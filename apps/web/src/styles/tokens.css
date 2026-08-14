@@ -1,0 +1,69 @@
+@import url('https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── DESIGN TOKENS — from the "Xsion Workspace" Claude Design reference ──────────
+   A single committed dark visual world: deep blue-black ground, acid-green accent,
+   amber for known-unknowns / Mode-2. Archivo display + IBM Plex Mono technical. */
+:root {
+  --paper: oklch(0.175 0.009 264);        /* app ground */
+  --surface: oklch(0.198 0.009 264);      /* panels / rails */
+  --surface-2: oklch(0.155 0.009 264);    /* inset inputs */
+  --ink: oklch(0.97 0.004 264);           /* primary text */
+  --line: oklch(1 0 0 / 0.07);            /* hairlines */
+  --line-strong: oklch(1 0 0 / 0.12);
+  --muted: oklch(0.70 0.012 264);
+  --muted-2: oklch(0.50 0.012 264);
+  --muted-3: oklch(0.42 0.012 264);
+  --accent: oklch(0.86 0.19 122);         /* acid green — the agent is live/acting */
+  --accent-ink: oklch(0.20 0.03 122);     /* text on accent */
+  --accent-soft: oklch(0.86 0.19 122 / 0.10);
+  --accent-line: oklch(0.86 0.19 122 / 0.5);
+  --amber: oklch(0.84 0.14 80);           /* unknowns / Mode 2 / medium confidence */
+  /* semantic verdicts */
+  --v-expected: oklch(0.80 0.14 150);
+  --v-flaky: oklch(0.84 0.14 80);
+  --v-unverified: oklch(0.66 0.012 264);  /* dignified slate — the fail-safe floor */
+  --v-realbug: oklch(0.70 0.18 24);
+  color-scheme: dark;
+}
+
+* { border-color: var(--line); box-sizing: border-box; }
+html, body, #root { height: 100%; }
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: 'Archivo', Helvetica, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+.mono { font-family: 'IBM Plex Mono', ui-monospace, monospace; }
+.tabular { font-variant-numeric: tabular-nums; }
+
+::selection { background: oklch(0.86 0.19 122 / 0.28); }
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-thumb { background: oklch(1 0 0 / 0.12); border-radius: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* faint grid texture (kept subtle) */
+.bg-grid {
+  background-image:
+    linear-gradient(var(--line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--line) 1px, transparent 1px);
+  background-size: 44px 44px;
+  mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000 40%, transparent 100%);
+}
+
+/* animations from the design reference */
+@keyframes xs-ripple { from { width:10px; height:10px; margin-left:-5px; margin-top:-5px; opacity:.85 } to { width:76px; height:76px; margin-left:-38px; margin-top:-38px; opacity:0 } }
+@keyframes xs-pulse { 0%,100% { opacity:1 } 50% { opacity:.2 } }
+@keyframes xs-sweep { 0% { transform:translateY(-100%) } 100% { transform:translateY(2400%) } }
+@keyframes xs-fade { from { opacity:0; transform:translateY(4px) } to { opacity:1; transform:none } }
+.anim-pulse { animation: xs-pulse 1.5s ease-in-out infinite; }
+.anim-fade { animation: xs-fade 240ms ease-out both; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
+}

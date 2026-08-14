@@ -1,0 +1,42 @@
+.topbar {
+  height: 60px;
+  background-color: var(--color-bg);
+  border-bottom: 1px solid var(--color-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 var(--spacing-xl);
+}
+
+.topbar__logo {
+  display: flex;
+  align-items: center;
+}
+
+.topbar__title {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--color-primary);
+  margin: 0;
+}
+
+.topbar__status {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+}
+
+.topbar__status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.topbar__status-dot--disconnected {
+  background-color: var(--color-error);
+}
+
+.topbar__status-text {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
