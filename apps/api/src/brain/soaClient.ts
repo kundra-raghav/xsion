@@ -46,6 +46,19 @@ export function bridgeErrorIsRetryable(errMessage: string): boolean {
   return /produced no JSON|JSON parse failed/i.test(errMessage) && !/timed out|Failed to spawn/i.test(errMessage);
 }
 
+// SECOND retry trigger (2026-08-30): the bridge can RESOLVE successfully with valid JSON that carries its OWN error
+// field — the LLM output was empty/unparseable at the bridge's internal parse layer (`{probes: [], error: "SoA audit
+// unparseable"}`). The subprocess didn't fail, so bridgeErrorIsRetryable never sees it; audit's silent zeros came from
+// exactly here. Retry that shape. THE TRAP: match the error's SHAPE, not its mere presence — a legitimate result
+// stated as an error string ("no vulnerabilities found") must NOT retry (it's a real finding, and retrying churns
+// cost + could re-break the audit no-silent-clean-bill guard). And an empty result with NO error is a real "found
+// nothing" — never retried. So key strictly on unparseable/empty-reply phrasing.
+export function bridgePayloadIsRetryable(res: any): boolean {
+  const e = String(res?.error || '');
+  if (!e) return false;   // no error field ⇒ a valid (possibly empty) result ⇒ never retry
+  return /unparseable|no json|empty (reply|response|output)|parse fail(ed|ure)?|malformed|could not parse/i.test(e);
+}
+
 function runBridgeOnce(args: string[], timeoutMs: number): Promise<any> {
   return new Promise((resolve, reject) => {
     const env = {
@@ -92,7 +105,14 @@ async function runBridge(args: string[], timeoutMs = 240_000): Promise<any> {
   let lastErr: any;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
-      return await runBridgeOnce(args, timeoutMs);
+      const res = await runBridgeOnce(args, timeoutMs);
+      // RESOLVED but the payload's OWN error says the LLM output was empty/unparseable → retry (subprocess was fine).
+      if (attempt < MAX_ATTEMPTS && bridgePayloadIsRetryable(res)) {
+        console.log(`[XSION][soa] "${args[0]}" resolved with an unparseable/empty payload (error: ${String(res.error).slice(0, 60)}) — retrying (attempt ${attempt + 1}/${MAX_ATTEMPTS})`);
+        await new Promise((r) => setTimeout(r, 800));
+        continue;
+      }
+      return res;
     } catch (e: any) {
       lastErr = e;
       if (attempt < MAX_ATTEMPTS && bridgeErrorIsRetryable(String(e?.message || e))) {

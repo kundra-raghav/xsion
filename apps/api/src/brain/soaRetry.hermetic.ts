@@ -6,7 +6,7 @@
  * probes which the audit guard correctly reports; retrying it would re-break that guard + churn cost). Keyed on the
  * ERROR shape, so a parsed empty array never even reaches this decision — asserted here so a future edit can't regress it.
  */
-import { bridgeErrorIsRetryable } from './soaClient';
+import { bridgeErrorIsRetryable, bridgePayloadIsRetryable } from './soaClient';
 
 let pass = 0, fail = 0;
 const ok = (name: string, cond: boolean) => { if (cond) { pass++; console.log('  ✓ ' + name); } else { fail++; console.log('  ✗ ' + name); } };
@@ -26,6 +26,18 @@ ok('no-JSON-on-timeout → NO retry (timeout dominates)', !bridgeErrorIsRetryabl
 // function — meaning an empty auditPlan (0 probes, a real "found nothing") is never retried. Assert the negative shape.
 ok('a non-error / empty string is NOT retryable (only real bridge errors are)', !bridgeErrorIsRetryable(''));
 ok('an unrelated error is NOT retryable', !bridgeErrorIsRetryable('some other failure'));
+
+// ── bridgePayloadIsRetryable: the bridge RESOLVED with valid JSON carrying its own error field ──
+// (the real audit case: {probes:[], error:"SoA audit unparseable"} — subprocess fine, LLM output unparseable)
+ok('payload error "SoA audit unparseable" → retry', bridgePayloadIsRetryable({ probes: [], error: 'SoA audit unparseable' }));
+ok('payload error "no JSON in reply" → retry', bridgePayloadIsRetryable({ error: 'no JSON in reply from model' }));
+// THE TRAP: an empty result with NO error is a real "found nothing" — the audit guard reports it, must NOT retry
+ok('empty result, NO error field → NO retry (real "found nothing")', !bridgePayloadIsRetryable({ probes: [] }));
+// THE OTHER TRAP: a legitimate result stated AS an error string must NOT retry (would churn cost + re-break the guard)
+ok('legit "no vulnerabilities found" error → NO retry', !bridgePayloadIsRetryable({ probes: [], error: 'no vulnerabilities found' }));
+ok('legit "insufficient code context" error → NO retry', !bridgePayloadIsRetryable({ error: 'insufficient code context to plan probes' }));
+// a full valid plan never retries
+ok('valid plan (probes present) → NO retry', !bridgePayloadIsRetryable({ probes: [{ title: 'x' }] }));
 
 console.log(`\n${pass}/${pass + fail} passed`);
 if (fail) process.exit(1);
