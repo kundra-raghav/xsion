@@ -108,6 +108,21 @@ async function runAudit(runId: string, projectId: string, baseUrl: string, opts:
   const surface = { baseUrl, routes: (map?.routeManifest || []), api: (map?.api || []).slice(0, 40).map((e: any) => ({ method: e.method, url: e.url, graphql: e.graphql, op: e.gqlOperation })) };
   const { probes, error } = await auditPlan(opts.repo, surface);
   if (error) emit(runId, { type: 'test:think', message: `Audit-plan note: ${error}` });
+  // NO-SILENT-CLEAN-BILL (2026-08-30): the audit plan is code-read by SoA (an LLM bridge) — it can return ZERO probes
+  // on a bridge timeout/error/empty response. Reporting 0 findings then is INDISTINGUISHABLE from "the code is clean"
+  // — the exact false-negative that burns trust. If no probes were planned, the audit did NOT run; say so explicitly
+  // (a needs-review finding + failed status), never a green 0. A real audit with real coverage is the only clean bill.
+  if (!probes.length) {
+    const notRun: AuditFinding = { cls: 'audit-coverage', title: 'Security audit could not run', severity: 'high',
+      codeRef: null as any, why: 'the code-reading planner returned no checks', verdict: 'needs-review',
+      detail: `The audit produced NO probes${error ? ` (planner error: ${error})` : ' (the code-reading step returned an empty plan — likely a bridge timeout or transient failure)'}. This is NOT a clean bill of health — no checks actually ran. Re-run the audit; if it persists, the code bridge/repo access needs attention.` };
+    store.updateTestRun(runId, { status: 'failed', finishedAt: new Date().toISOString(), artifacts: [{ kind: 'security-audit', tier, findings: [notRun] } as any] } as any);
+    emit(runId, { type: 'audit:finding', index: 0, finding: notRun });
+    emit(runId, { type: 'test:phase', phase: 'done', label: 'Audit could not run', kind: 'security' });
+    emit(runId, { type: 'test:think', message: 'Audit produced no checks — reported as needs-review (NOT a clean pass). Re-run to retry the code-reading step.' });
+    emit(runId, { type: 'test:done', passed: 0, failed: 0, skipped: 0, total: 0 });
+    return;
+  }
   emit(runId, { type: 'test:think', message: `SoA read the code and proposed ${probes.length} code-grounded checks to run.` });
 
   emit(runId, { type: 'test:phase', phase: 'run', label: 'Running probes', kind: 'security' });
