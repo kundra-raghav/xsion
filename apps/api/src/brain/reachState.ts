@@ -136,7 +136,11 @@ export function pruneRedundantSteps<T extends { intent?: string }>(steps: T[], c
   const nc = chosenOpt ? norm(chosenOpt) : '';
   // the origin root path(s) that, when re-visited, would log an authenticated session back out
   let rootHosts: string[] = [];
-  try { if (baseUrl) { const u = new URL(baseUrl); rootHosts = [u.origin.toLowerCase(), (u.origin + '/').toLowerCase(), u.host.toLowerCase()]; } } catch {}
+  let rootPaths: string[] = [];   // the baseUrl's OWN path (e.g. "/torture-erp.html") — a single-file SPA's root is a
+                                  // PATH, not just an origin, so "navigate to /torture-erp.html" is a re-visit-the-root
+                                  // that logs out an in-memory session. Matching only by host/origin missed it (the
+                                  // bug-repro login-bounce: step 1 re-navigated the app root without the session).
+  try { if (baseUrl) { const u = new URL(baseUrl); rootHosts = [u.origin.toLowerCase(), (u.origin + '/').toLowerCase(), u.host.toLowerCase()]; if (u.pathname && u.pathname !== '/') rootPaths = [u.pathname.toLowerCase(), (u.origin + u.pathname).toLowerCase()]; } } catch {}
   return (steps || []).filter((s) => {
     const i = s.intent || '';
     if (authPassed && (LOGIN_STEP.test(i) || LOGIN_FIELD_STEP.test(i))) return false;   // login pre-step already did this
@@ -147,7 +151,9 @@ export function pruneRedundantSteps<T extends { intent?: string }>(steps: T[], c
     if (authPassed && NAVIGATE_VERB.test(i) && !NON_SELECT_WORK.test(i)) {
       const low = i.toLowerCase();
       const toRoot = /\/login\b|\/signin\b|\/sign-in\b/.test(low)
-        || rootHosts.some((h) => h && low.includes(h) && !/[a-z0-9]\/[a-z0-9]/i.test(low.split(h)[1] || ''));  // host present + no real inner path after it
+        || rootHosts.some((h) => h && low.includes(h) && !/[a-z0-9]\/[a-z0-9]/i.test(low.split(h)[1] || ''))  // host present + no real inner path after it
+        // the baseUrl's own path with no extra route after it (a single-file SPA root: "navigate to /torture-erp.html")
+        || rootPaths.some((p) => { if (!p) return false; const idx = low.indexOf(p); if (idx < 0) return false; const after = low.slice(idx + p.length).replace(/^[#?][^\s]*/, '').trim(); return after === '' || after === '/'; });
       if (toRoot) return false;
     }
     return true;

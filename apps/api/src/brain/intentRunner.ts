@@ -683,6 +683,16 @@ export async function resolveClick(page: Page, target: string, intent = ''): Pro
       ? { kind: `role:${m.cand.role}`, selector: m.cand.name, matched: 1, error: err, box }
       : { kind: `role:${m.cand.role}`, selector: `${m.cand.name}~"${target}"`, matched: 1, chosenIndex: 0, box };
   }
+  // FALLBACK: EXACT-LABEL / WRAPPED-NAV click (2026-08-30). bestMatch scores accessible NAMES — but a nav item whose
+  // label lives in a child <span> with a concatenated route hint ("Orders#/orders") and no aria-label has an EMPTY
+  // accessible name, so bestMatch returns matched:0 and the step fails (bug-repro's "click Orders#/orders" → every
+  // downstream step cascaded, and its loginWall heuristic then misblamed missing creds even though login had SUCCEEDED).
+  // clickByLabelInPage's pass-2 sees through the wrapper (first-span text / route-hint-stripped text / data-nav attr)
+  // and does a real click — the same fix already proven for reach, now applied to the step path. Clean short label only.
+  if (target && target.length <= 42 && !/\s{3,}/.test(target)) {
+    const exact = await clickByLabelInPage(page, target);
+    if (exact) return { kind: 'exact-label', selector: `exact:"${target}"`, matched: 1, chosenIndex: 0 };
+  }
   // FALLBACK: sidebar/nav <a href> link (the reliable route when role-name scoring missed the nav element)
   const nav = await resolveNavLink(page, words);
   if (nav.loc) {
@@ -1215,12 +1225,15 @@ async function clickByLabelInPage(page: Page, label: string): Promise<boolean> {
       // PASS 2 — exact on the element's OWN label seen through a wrapper: its first text-bearing child (a nested <span>
       // holds the real label while textContent also picks up a sibling hint), or the full text with the route hint
       // stripped, or a data-nav attribute value. General: routes/labels are often wrapped, not on the clickable node.
+      // The WANT is ALSO stripped — a step intent like `click "Orders#/orders"` carries the SAME wrapper hint the crawl
+      // captured, so both sides must be normalized or an element "Orders" never matches a want "orders#/orders".
+      const ws = norm(strip(w));
       for (const el of cands) {
         const firstSpan = el.querySelector && el.querySelector('span,label,strong,b');
         const spanTxt = firstSpan ? norm(firstSpan.textContent) : '';
         const stripped = norm(strip(el.textContent || ''));
         const dataNav = norm(el.getAttribute && el.getAttribute('data-nav') || '');
-        if (spanTxt === w || stripped === w || dataNav === w) { el.setAttribute('data-xsai', '1'); return true; }
+        if (spanTxt === w || stripped === w || dataNav === w || spanTxt === ws || stripped === ws || dataNav === ws) { el.setAttribute('data-xsai', '1'); return true; }
       }
       return false;
     }, want);
