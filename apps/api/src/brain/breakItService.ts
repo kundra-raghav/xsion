@@ -205,7 +205,18 @@ async function runBreakIt(runId: string, projectId: string, baseUrl: string, opt
     // firewall-clean L2 targeting hints (addressing only — no verdict, no evidence prose). Absent if uncrawled/errored.
     comprehensionTargets,
   };
-  const { plan: plannedSteps, error } = await breakItPlan(opts.repo, { feature: opts.feature, surface });
+  // PLAN SOURCE (2026-08-30): SoA's LLM plan is non-deterministic AND — measured across 6 runs — contributes ZERO real
+  // verdicts on the UI path (40 SoA + 7 api findings = 47, ALL needs-review; every held/passed came from the
+  // deterministic scaffold / ground-truth regen / modal-click). So SoA is pure noise here: it drives the 7→25→27 plan
+  // drift, most of the harness-fail needs-reviews, and the LLM latency. Default to 'scaffold' (deterministic only):
+  // constant plan size, near-zero harness-fail, no LLM plan call. 'both' restores SoA for A/B or a code-grounded probe.
+  const planSource = (process.env.XSION_PLAN_SOURCE || 'scaffold').toLowerCase();
+  let plannedSteps: BreakStep[] = [], error: string | undefined;
+  if (planSource === 'both') {
+    ({ plan: plannedSteps, error } = await breakItPlan(opts.repo, { feature: opts.feature, surface }));
+  } else {
+    emit(runId, { type: 'test:think', message: 'Plan source: deterministic scaffold + live-page ground truth (SoA plan skipped — it drifts run-to-run and lands no real verdicts on the UI path). Set XSION_PLAN_SOURCE=both to include it.' });
+  }
   let plan = plannedSteps;   // mutable: quick mode filters it to happy/crud below
   if (error) emit(runId, { type: 'test:think', message: `Plan note: ${error}` });
 

@@ -1202,9 +1202,25 @@ async function clickByLabelInPage(page: Page, label: string): Promise<boolean> {
     const found = await page.evaluate((w: string) => {
       const d: any = (globalThis as any).document;
       d.querySelectorAll('[data-xsai]').forEach((e: any) => e.removeAttribute('data-xsai'));
-      for (const el of Array.prototype.slice.call(d.querySelectorAll('button, a, [role="button"], [onclick], input, [role="menuitem"], [role="tab"]'))) {
-        const t = (el.getAttribute('aria-label') || el.textContent || el.getAttribute('value') || '').trim().replace(/\s+/g, ' ').toLowerCase();
+      // strip a trailing route/hash hint a nav wrapper concatenates onto its label (torture: "Orders#/orders",
+      // "Rules Engine#/rules") so an exact-label match still lands on the nav item. Also strips a bracketed hint.
+      const strip = (s: string) => s.replace(/\s*#?\/?[a-z0-9/_-]*$/i, (m) => (/^#?\/?[a-z]/i.test(m.trim()) && m.trim().includes('/') ? '' : m)).replace(/\s*\[[^\]]*\]\s*$/, '').trim();
+      const norm = (s: string) => (s || '').trim().replace(/\s+/g, ' ').toLowerCase();
+      const cands = Array.prototype.slice.call(d.querySelectorAll('button, a, [role="button"], [onclick], input, [role="menuitem"], [role="tab"], [data-nav]'));
+      // PASS 1 — exact on aria-label / full text / value.
+      for (const el of cands) {
+        const t = norm(el.getAttribute('aria-label') || el.textContent || el.getAttribute('value') || '');
         if (t === w) { el.setAttribute('data-xsai', '1'); return true; }
+      }
+      // PASS 2 — exact on the element's OWN label seen through a wrapper: its first text-bearing child (a nested <span>
+      // holds the real label while textContent also picks up a sibling hint), or the full text with the route hint
+      // stripped, or a data-nav attribute value. General: routes/labels are often wrapped, not on the clickable node.
+      for (const el of cands) {
+        const firstSpan = el.querySelector && el.querySelector('span,label,strong,b');
+        const spanTxt = firstSpan ? norm(firstSpan.textContent) : '';
+        const stripped = norm(strip(el.textContent || ''));
+        const dataNav = norm(el.getAttribute && el.getAttribute('data-nav') || '');
+        if (spanTxt === w || stripped === w || dataNav === w) { el.setAttribute('data-xsai', '1'); return true; }
       }
       return false;
     }, want);
