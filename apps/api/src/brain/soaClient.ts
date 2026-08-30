@@ -35,7 +35,18 @@ export interface SoaVerification {
 }
 
 /** Run the bridge with args; resolve its parsed JSON stdout. Rejects on spawn/parse/timeout. */
-function runBridge(args: string[], timeoutMs = 240_000): Promise<any> {
+// RETRY DECISION (2026-08-30, extracted for hermetic testing): the SoA bridge is an LLM behind a python subprocess.
+// It intermittently emits NO json or UNPARSEABLE json — a transient LLM/serialization hiccup that a fresh call almost
+// always clears. This was the shared root of audit's 6/4/0 probe drift, bug-repro's "reply not valid JSON", and goal's
+// occasional dead step. Retry ONLY those two shapes. NEVER retry a TIMEOUT (would double a 300s wait) or a spawn
+// failure (an environment problem a retry can't fix). A VALID response with an empty array is NOT a hiccup — it's a
+// legitimate "found nothing" (e.g. auditPlan returning 0 probes, which the audit guard correctly reports); retrying it
+// would be wrong and would churn cost. So the decision keys on the ERROR shape, never on the parsed content.
+export function bridgeErrorIsRetryable(errMessage: string): boolean {
+  return /produced no JSON|JSON parse failed/i.test(errMessage) && !/timed out|Failed to spawn/i.test(errMessage);
+}
+
+function runBridgeOnce(args: string[], timeoutMs: number): Promise<any> {
   return new Promise((resolve, reject) => {
     const env = {
       ...process.env,
@@ -72,6 +83,27 @@ function runBridge(args: string[], timeoutMs = 240_000): Promise<any> {
       }
     });
   });
+}
+
+// RETRY WRAPPER: one extra attempt on an empty/unparseable reply (see bridgeErrorIsRetryable), with a short backoff.
+// 2 attempts total. Every other failure (timeout, spawn error) propagates immediately — no wasted second wait.
+async function runBridge(args: string[], timeoutMs = 240_000): Promise<any> {
+  const MAX_ATTEMPTS = 2;
+  let lastErr: any;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      return await runBridgeOnce(args, timeoutMs);
+    } catch (e: any) {
+      lastErr = e;
+      if (attempt < MAX_ATTEMPTS && bridgeErrorIsRetryable(String(e?.message || e))) {
+        console.log(`[XSION][soa] "${args[0]}" returned empty/unparseable — retrying (attempt ${attempt + 1}/${MAX_ATTEMPTS})`);
+        await new Promise((r) => setTimeout(r, 800));
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw lastErr;
 }
 
 /** PLAN: SoA reads `repo` → returns intent-flows for the app deployed at `baseUrl`. */
