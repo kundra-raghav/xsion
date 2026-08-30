@@ -26,9 +26,12 @@ export function startApiTest(projectId: string, baseUrl: string, opts: ApiTestOp
   const runId = uuid();
   store.createTestRun({ id: runId, projectId, status: 'running', startedAt: new Date().toISOString(), artifacts: [], stepResults: [], summary: `API test · ${baseUrl}` } as any);
   runApiTest(runId, projectId, baseUrl, opts).catch((e) => {
-    emit(runId, { type: 'test:think', message: `error: ${String(e.message || e)}` });
+    const msg = String(e?.message || e).slice(0, 300);
+    emit(runId, { type: 'test:think', message: `error: ${msg}` });
     emit(runId, { type: 'test:phase', phase: 'done', label: 'Run failed', kind: 'api' });
-    store.updateTestRun(runId, { status: 'failed', finishedAt: new Date().toISOString() });
+    // PERSIST the error in an artifact — a failed run must NOT be a blank record (the user opens it and sees why,
+    // not `{}`). Honest: the failure is auditable.
+    store.updateTestRun(runId, { status: 'failed', finishedAt: new Date().toISOString(), artifacts: [{ kind: 'api', error: msg, results: [], detail: `The API test could not run: ${msg}` } as any] } as any);
   });
   return runId;
 }
@@ -36,6 +39,7 @@ export function startApiTest(projectId: string, baseUrl: string, opts: ApiTestOp
 async function runApiTest(runId: string, projectId: string, baseUrl: string, opts: ApiTestOpts) {
   const map = store.getProjectMap(projectId);
   const endpoints: any[] = map?.api || [];
+  console.log(`[XSION][api-test] START run=${runId.slice(0,8)} project=${projectId} url=${baseUrl} endpoints=${endpoints.length} allowMutating=${!!opts.allowMutating}`);
   emit(runId, { type: 'test:phase', phase: 'start', label: 'Preparing endpoint replay', kind: 'api' });
   emit(runId, { type: 'test:think', message: `${endpoints.length} endpoints recorded during the crawl. Replaying the safe (read-only) ones and checking status + response shape.` });
 
@@ -64,6 +68,21 @@ async function runApiTest(runId: string, projectId: string, baseUrl: string, opt
       continue;
     }
 
+    // GUARD (the "position 400" false-failure fix): if the recorded GraphQL payload is NOT valid JSON, it was
+    // corrupted at RECORD time (an older crawl truncated it with .slice(0,400)) — replaying it 400s and we'd blame
+    // the APP. That's Xsion's own bug, never a verdict on the API. Skip it honestly and tell the user to re-crawl.
+    if (ep.graphql && ep.samplePayload) {
+      let payloadOk = false;
+      try { JSON.parse(ep.samplePayload); payloadOk = true; } catch {}
+      if (!payloadOk) {
+        skipped++;
+        const detail = 'skipped — the recorded query sample was truncated by an older crawl (not valid JSON), so replaying it would falsely 400. Re-crawl this app to record the full payload, then re-run.';
+        emit(runId, { type: 'test:item-result', index: i, status: 'skipped', detail });
+        results.push({ index: i, title, status: 'skipped', detail, resolution: { kind: 'unreachable' } });
+        replayItems.push({ method: ep.method, url: ep.url, replayed: false, reason: 'stale-truncated-payload' });
+        continue;
+      }
+    }
     // replay the endpoint and check status + JSON-shape. GraphQL queries re-POST their recorded payload.
     try {
       const url = ep.url.startsWith('http') ? ep.url.replace('/:id', '/1') : `${baseUrl}${ep.url}`;
@@ -72,7 +91,7 @@ async function runApiTest(runId: string, projectId: string, baseUrl: string, opt
       if (ep.graphql && ep.samplePayload) {
         fetchOpts.method = 'POST';
         fetchOpts.headers = { 'content-type': 'application/json' };
-        fetchOpts.body = ep.samplePayload;   // the recorded query payload (the operation SoA identified)
+        fetchOpts.body = ep.samplePayload;   // the recorded query payload (the operation SoA identified) — validated above
       }
       const resp = await fetch(url, fetchOpts);
       const ms = Date.now() - t0;
@@ -88,16 +107,22 @@ async function runApiTest(runId: string, projectId: string, baseUrl: string, opt
 
       let status: 'pass' | 'fail' | 'unverifiable';
       let detail: string;
-      if (resp.status >= 500) { status = 'fail'; detail = `HTTP ${resp.status} — server error`; failed++; }
-      else if (gqlErrors) { status = 'fail'; detail = `HTTP ${resp.status} but GraphQL returned errors: ${gqlErrors.slice(0, 80)}`; failed++; }
-      else if (expected && !matchesRecorded) { status = 'fail'; detail = `status drift: recorded ${expected}, got ${resp.status}`; failed++; }
+      let resolution: any = undefined;   // a FAIL is a FINDING → carry a next-action so it surfaces in actionsPending
+      if (resp.status >= 500) { status = 'fail'; detail = `HTTP ${resp.status} — server error`; failed++; resolution = { kind: 'file-ticket' }; }   // a real server error worth reporting
+      else if (gqlErrors) {
+        status = 'fail'; detail = `HTTP ${resp.status} but GraphQL returned errors: ${gqlErrors.slice(0, 80)}`; failed++;
+        // AMBIGUOUS by nature (advisor): a "Cannot query field" 400 replaying a captured query is either a STALE
+        // recorded query OR live schema drift — indistinguishable from the response. Ask, don't guess (needs-input).
+        resolution = { kind: 'needs-input', question: `Replaying the captured "${ep.gqlOperation || 'GraphQL'}" query returned ${resp.status}: "${gqlErrors.slice(0, 100)}". Either the recorded query is stale, or the server schema changed. Which is it?` };
+      }
+      else if (expected && !matchesRecorded) { status = 'fail'; detail = `status drift: recorded ${expected}, got ${resp.status}`; failed++; /* TODO: distinct resolution kind for status-drift */ }
       else if (statusOk) { status = 'pass'; detail = `${ep.graphql ? ep.gqlOperation + ' · ' : ''}HTTP ${resp.status} · ${ms}ms · ${isJson ? 'JSON body' : 'non-JSON'}`; passed++; }
       else if (resp.status === 401 || resp.status === 403) { status = 'unverifiable'; detail = `HTTP ${resp.status} — needs auth (sign-in context) to judge`; }
       else { status = 'unverifiable'; detail = `HTTP ${resp.status} — needs auth or context to judge`; }
 
       const evidence = bodyText.slice(0, 120);
       emit(runId, { type: 'test:item-result', index: i, status, detail, evidence });
-      results.push({ index: i, title, status, detail });
+      results.push({ index: i, title, status, detail, ...(resolution ? { resolution } : {}) });
       replayItems.push({ method: ep.method, url: ep.url, replayed: true, status: resp.status, ms });
     } catch (e: any) {
       failed++;
@@ -112,12 +137,21 @@ async function runApiTest(runId: string, projectId: string, baseUrl: string, opt
   emit(runId, { type: 'test:phase', phase: 'done', label: 'API test complete', kind: 'api' });
   emit(runId, { type: 'test:done', passed, failed, skipped, total: endpoints.length });
   // RECORD for replay/reference: the endpoint list + what actually ran (a re-runnable record, not just a log).
+  // ★ the RESULTS must live in artifacts[0] — every reader (UI runs-list, /record) reads artifacts[0], so writing
+  //   only to stepResults left the record LOOKING blank ({}). Put the findings in the artifact like every engine.
   store.updateTestRun(runId, {
-    status: failed ? 'failed' : 'passed', finishedAt: new Date().toISOString(),
+    // RUN STATUS = "did the run EXECUTE?", not "is the app healthy?" (advisor). A run that probed N endpoints and
+    // recorded N outcomes COMPLETED its job → 'passed', even if some probes found problems. Per-probe FAILs are
+    // FINDINGS (each carries a resolution → surfaced via actionsPending + the "N pass · N fail" summary), NOT the
+    // run's status. 'failed' is reserved for a run that couldn't execute (the early-return path when 0 endpoints /
+    // auth-blocked / thrown). This mirrors bug-repro (verdict ≠ run status) and stops "29/31 pass" reading as red.
+    status: results.length > 0 ? 'passed' : 'failed', finishedAt: new Date().toISOString(),
     summary: `API test · ${passed} pass · ${failed} fail · ${skipped} skipped`,
     stepResults: results as any,
-    ...( { replay: { kind: 'api', baseUrl, endpoints: replayItems, allowMutating: !!opts.allowMutating } } as any),
-  });
+    artifacts: [{ kind: 'api', results, passed, failed, skipped, total: endpoints.length,
+      detail: `${passed} passed · ${failed} failed · ${skipped} skipped (of ${endpoints.length} observed endpoints)`,
+      replay: { baseUrl, endpoints: replayItems, allowMutating: !!opts.allowMutating } } as any],
+  } as any);
 }
 
 function short(u: string) { return u.replace(/^https?:\/\//, '').slice(0, 48); }

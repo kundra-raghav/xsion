@@ -1,0 +1,17 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Calendar</title></head><body>
+<h1>My Calendar</h1>
+<ul id="events">
+  <li tabindex="0" data-ev="Staff Meeting 2026-08-20 09:00">Staff Meeting 2026-08-20 09:00</li>
+  <li tabindex="0" data-ev="X7K3 2026-08-25 14:00">X7K3 2026-08-25 14:00</li>
+  <li tabindex="0" data-ev="Assembly 2026-08-26 10:00">Assembly 2026-08-26 10:00</li>
+</ul>
+<div id="detail" role="dialog" style="display:none;border:2px solid #333;padding:16px;margin-top:12px"></div>
+<script>
+document.querySelectorAll('#events li').forEach(function(li){
+  li.addEventListener('click',function(){
+    var d=document.getElementById('detail');
+    d.style.display='block';
+    d.textContent='EVENT DETAIL: '+li.dataset.ev;   // opens a detail "modal" (role=dialog appears)
+  });
+});
+</script></body></html>

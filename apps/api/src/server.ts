@@ -45,6 +45,19 @@ export function createHttpServer(): Server {
     }
   });
 
+  // ── [XSION] focused request logger: every /api hit with a compact, cred-REDACTED body summary, so live UI testing
+  // is followable from the backend console. (morgan already logs method+path+status; this adds the meaningful body.)
+  app.use('/api', (req, _res, next) => {
+    try {
+      const b = { ...(req.body || {}) };
+      for (const k of ['password', 'email', 'pw', '_password', '_email']) if (k in b) b[k] = b[k] ? '***' : b[k];
+      const keys = Object.keys(b);
+      const summary = keys.length ? ' body={' + keys.map((k) => `${k}:${typeof b[k] === 'string' ? JSON.stringify(String(b[k]).slice(0, 40)) : JSON.stringify(b[k]).slice(0, 40)}`).join(', ') + '}' : '';
+      if (req.method !== 'GET') console.log(`[XSION][req] ${req.method} ${req.originalUrl}${summary}`);
+    } catch {}
+    next();
+  });
+
   // API routes
   app.use('/api', apiRouter);
 

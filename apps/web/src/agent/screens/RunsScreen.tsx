@@ -16,6 +16,9 @@ const KIND_META: Record<string, { label: string; cls: string }> = {
   'env-matrix': { label: 'CONDITIONS', cls: 'bg-[oklch(0.84_0.14_80_/_0.14)] text-amber' },
   'security-audit': { label: 'AUDIT', cls: 'bg-[oklch(0.66_0.14_300_/_0.14)] text-[oklch(0.72_0.14_300)]' },
   flow: { label: 'FLOW', cls: 'bg-[oklch(0.80_0.14_150_/_0.14)] text-expected' },
+  api: { label: 'CONTRACT', cls: 'bg-[oklch(0.72_0.14_200_/_0.14)] text-[oklch(0.72_0.14_200)]' },
+  'fe-api': { label: 'WIRING', cls: 'bg-[oklch(0.72_0.12_220_/_0.14)] text-[oklch(0.72_0.12_220)]' },
+  'test-cases': { label: 'AUTHOR', cls: 'bg-[oklch(0.80_0.14_150_/_0.14)] text-expected' },
   run: { label: 'RUN', cls: 'bg-[oklch(1_0_0_/_0.06)] text-muted-2' },
 };
 const outcomeTone = (o?: string) => !o ? 'text-muted-2' : /broke|vulnerable|fail|reproduced/.test(o) ? 'text-realbug' : /held|clean|passed|not-reproduced|covered|all conditions/.test(o) ? 'text-expected' : 'text-muted-2';
@@ -149,10 +152,42 @@ function RunResult({ state, kind }: { state: any; kind: string }) {
       </div>
     );
   }
-  if ((kind === 'env-matrix' || kind === 'flow') && state.items?.length) {
+  if (kind === 'test-cases' && state.cases?.length) {
     return (
       <>
-        <Label className="mb-3">{kind === 'env-matrix' ? 'Conditions' : 'Steps'}</Label>
+        <Label className="mb-3">Test cases authored ({state.cases.length})</Label>
+        <div className="flex flex-col gap-1.5">
+          {state.cases.map((c: any, i: number) => (
+            <div key={i} className="flex items-center gap-2.5 rounded-[5px] border border-line bg-surface px-3.5 py-2.5">
+              {c.priority && <span className="mono shrink-0 text-[9.5px] text-accent">{c.priority}</span>}
+              <span className="flex-1 truncate text-[12.5px]">{c.title || `case ${i + 1}`}</span>
+            </div>
+          ))}
+        </div>
+      </>
+    );
+  }
+  if (kind === 'security-audit') {
+    if (!state.findings?.length) return <div className="mono text-[12px] text-muted-2">No findings at this tier — the code-grounded checks passed.</div>;
+    return (
+      <>
+        <Label className="mb-3">Findings ({state.findings.length})</Label>
+        <div className="flex flex-col gap-1.5">
+          {state.findings.map((f: any, i: number) => (
+            <div key={i} className="flex items-center gap-2.5 rounded-[5px] border border-line bg-surface px-3.5 py-2.5">
+              <span className="flex-1 truncate text-[12.5px]">{f.title || f.summary}</span>
+              {f.severity && <span className="mono text-[10px] text-muted-2">{f.severity}</span>}
+              {f.codeRef && <span className="mono text-[9.5px] text-accent">{String(f.codeRef).replace(/^.*\/(apps|src)\//, '$1/')}</span>}
+            </div>
+          ))}
+        </div>
+      </>
+    );
+  }
+  if ((kind === 'env-matrix' || kind === 'flow' || kind === 'api' || kind === 'fe-api') && state.items?.length) {
+    return (
+      <>
+        <Label className="mb-3">{kind === 'env-matrix' ? 'Conditions' : kind === 'fe-api' ? 'UI action → API' : kind === 'api' ? 'Endpoint replay' : 'Steps'}</Label>
         <div className="flex flex-col gap-1.5">
           {state.items.map((it: any) => (
             <div key={it.index} className="flex items-center gap-2.5 rounded-[5px] border border-line bg-surface px-3.5 py-2.5">

@@ -10,10 +10,12 @@ import { startPlaywrightTestRun } from '../runners/playwrightTestRun';
 import { startSoaRun } from '../brain/soaRunService';
 import { startCrawlMap } from '../brain/crawlMapService';
 import { startApiTest } from '../brain/apiTestService';
+import { recordObservation } from '../brain/projectKnowledge';
 import { startGenCases, startFeApi } from '../brain/soaTestServices';
 import { startSecurityAudit } from '../brain/securityAuditService';
 import { startEnvMatrix } from '../brain/envMatrixService';
 import { startBreakIt } from '../brain/breakItService';
+import { startGoal } from '../brain/goalRunService';
 import { startBugRepro } from '../brain/bugReproService';
 import { startMission } from '../brain/missionService';
 import { testPlan } from '../brain/soaClient';
@@ -53,6 +55,7 @@ projectsRouter.post('/:projectId/crawl-map', async (req, res) => {
     }
   }
   try {
+    console.log(`[XSION][crawl] POST /crawl-map project=${projectId} url=${target} hasCreds=${!!(roleEmail && rolePassword)} role=${role?.name || '(none)'} repo=${!!repo}`);
     const runId = startCrawlMap(projectId, { baseUrl: target, repo, email: roleEmail, password: rolePassword, role });
     return res.status(201).json({ runId, projectId, baseUrl: target, role: role?.name });
   } catch (e: any) {
@@ -73,8 +76,11 @@ projectsRouter.put('/:projectId/credentials', (req, res) => {
   const p = store.getProject(req.params.projectId); if (!p) return res.status(404).json({ error: 'Project not found' });
   const email = typeof req.body?.email === 'string' ? req.body.email.trim() : '';
   const password = typeof req.body?.password === 'string' ? req.body.password : '';
+  console.log(`[XSION][creds] PUT /credentials project=${req.params.projectId} email="${email ? email.replace(/(.{2}).*(@.*)/, '$1***$2') : '(empty→CLEAR)'}" hasPassword=${!!password}`);
   if (email && password) store.updateProject(req.params.projectId, { _defaultCreds: { email, password } } as any);
   else store.updateProject(req.params.projectId, { _defaultCreds: undefined } as any);   // clear
+  const after = store.getProject(req.params.projectId) as any;
+  console.log(`[XSION][creds] after PUT: project.hasCredentials=${!!after?._defaultCreds}`);
   return res.json({ hasCredentials: !!(email && password) });   // never echo the values
 });
 
@@ -104,18 +110,37 @@ projectsRouter.post('/:projectId/roles', (req, res) => {
   const p = store.getProject(req.params.projectId); if (!p) return res.status(404).json({ error: 'Project not found' });
   const { name, email, password } = req.body || {};
   if (!name) return res.status(400).json({ error: 'role name required' });
+  console.log(`[XSION][creds] POST /roles project=${req.params.projectId} name="${name}" email="${email ? String(email).replace(/(.{2}).*(@.*)/, '$1***$2') : '(none)'}" hasPassword=${!!password}`);
   const role: any = { id: uuidv4(), name: String(name), hasCredentials: !!(email && password) };
   if (email) role._email = String(email);        // in-memory only — store.updateProject strips underscored keys before persist
   if (password) role._password = String(password);
-  const roles = [...(p.roles || []), role];
-  store.updateProject(req.params.projectId, { roles } as any);
-  return res.status(201).json({ role: { id: role.id, name: role.name, hasCredentials: role.hasCredentials } });
+  const patch: any = { roles: [...(p.roles || []), role] };
+  // ★ THE FIX (creds saved in Roles & coverage were NEVER USED): the engines (break-it/bug-repro/env-matrix) read
+  // project._defaultCreds, NOT role creds — so adding a role with creds did nothing for them. PROMOTE this role's
+  // creds to the project default when the project has none yet, so "save creds here" actually signs the engines in.
+  if (email && password && !(p as any)._defaultCreds) {
+    patch._defaultCreds = { email: String(email), password: String(password) };
+    console.log(`[XSION][creds] promoted role "${name}" creds → project _defaultCreds (engines will now use them). project=${req.params.projectId}`);
+  } else if (email && password) {
+    console.log(`[XSION][creds] project already has _defaultCreds; role "${name}" creds stored on the role only (use PUT /credentials to change the project default).`);
+  }
+  store.updateProject(req.params.projectId, patch);
+  const after = store.getProject(req.params.projectId) as any;
+  console.log(`[XSION][creds] after save: project.hasCredentials=${!!after?._defaultCreds} roles=${(after?.roles || []).length}`);
+  return res.status(201).json({ role: { id: role.id, name: role.name, hasCredentials: role.hasCredentials }, projectHasCredentials: !!after?._defaultCreds });
 });
 projectsRouter.delete('/:projectId/roles/:roleId', (req, res) => {
   const p = store.getProject(req.params.projectId); if (!p) return res.status(404).json({ error: 'Project not found' });
   const roles = (p.roles || []).filter((r: any) => r.id !== req.params.roleId);
   store.updateProject(req.params.projectId, { roles } as any);
   return res.json({ ok: true });
+});
+
+// DELETE a whole project — cascades to its map, map-history, and test runs (store.deleteProject cleans all).
+projectsRouter.delete('/:projectId', (req, res) => {
+  const p = store.getProject(req.params.projectId); if (!p) return res.status(404).json({ error: 'Project not found' });
+  const ok = store.deleteProject(req.params.projectId);
+  return res.json({ ok, deleted: req.params.projectId });
 });
 
 // ── PER-ROLE COVERAGE (item 4): the "nothing is left" check — which routes each role reached, and which routes
@@ -227,6 +252,24 @@ projectsRouter.post('/:projectId/test/break-it', (req, res) => {
   if (!feature) return res.status(400).json({ error: 'feature required — name the feature to break (e.g. "Create Event")' });
   const runId = startBreakIt(req.params.projectId, req.body?.baseUrl || p.baseUrl, {
     repo: req.body?.repo || '', feature: String(feature), flowId: req.body?.flowId, destructiveAck: !!req.body?.destructiveAck,
+    scope: typeof req.body?.scope === 'string' ? req.body.scope : undefined,   // e.g. "NZ Curriculum" → enter that tenant before attacking
+  });
+  return res.status(201).json({ runId });
+});
+
+// ── GENERAL GOAL AGENT: a plain-English multi-step GOAL → runGoal drives it adaptively (LLM plans / deterministic
+// executes / structure verifies), streamed live + recorded. NOT a per-task engine — one general agent for any goal.
+projectsRouter.post('/:projectId/test/goal', (req, res) => {
+  const p = store.getProject(req.params.projectId); if (!p) return res.status(404).json({ error: 'Project not found' });
+  const goal = req.body?.goal;
+  if (!goal || String(goal).trim().length < 4) return res.status(400).json({ error: 'goal required — describe what to do (e.g. "create an event and verify it opens")' });
+  // creds: caller-supplied (POST body) win; else the project's in-memory _defaultCreds (set via the cred prompt).
+  // The route MUST forward body creds — otherwise a fresh server (tsx restart wipes _defaultCreds) has no way to log
+  // in and the whole run burns against the login gate (exactly the 484e786b failure: 24 steps, all on the login page).
+  const bodyCreds = req.body?.creds && req.body.creds.email && req.body.creds.password ? req.body.creds : undefined;
+  const runId = startGoal(req.params.projectId, req.body?.baseUrl || p.baseUrl, {
+    goal: String(goal), maxSteps: typeof req.body?.maxSteps === 'number' ? req.body.maxSteps : undefined,
+    creds: bodyCreds,
   });
   return res.status(201).json({ runId });
 });
@@ -267,6 +310,61 @@ projectsRouter.get('/:projectId/runs/:runId/record', (req, res) => {
   return res.json(run);
 });
 
+// ── RESOLVE A FINDING (the "approve button" — the entrepreneur-lens fix): a needs-review finding is not a dead
+// end. The user answers its ONE question (was this a bug?) and the finding RE-VERDICTS: yes → broke, no → held.
+// This is the teach-the-oracle loop made real. Body: { index, answer: 'bug' | 'fine' }. Only 'answer-oracle'
+// findings are resolvable this way (authorize/credentials/unreachable resolve by their own actions, not a yes/no).
+projectsRouter.post('/:projectId/runs/:runId/findings/:index/resolve', (req, res) => {
+  const run = store.getTestRun(req.params.runId);
+  if (!run) return res.status(404).json({ error: 'Run not found' });
+  const art = ((run as any).artifacts || [])[0];
+  const findings = art?.findings || [];
+  const idx = parseInt(req.params.index, 10);
+  const finding = findings[idx];
+  if (!finding) return res.status(404).json({ error: `finding ${idx} not found` });
+  const answer = String(req.body?.answer || '');
+  if (answer !== 'bug' && answer !== 'fine') return res.status(400).json({ error: `answer must be 'bug' or 'fine'` });
+  if (finding.resolution?.kind !== 'answer-oracle') {
+    return res.status(409).json({ error: `finding ${idx} isn't answerable by yes/no — its resolution is '${finding.resolution?.kind}' (resolve it by that action instead)` });
+  }
+  // re-verdict + record that a HUMAN decided this (so the UI shows it as user-confirmed, and future runs of the
+  // same attack can carry the answer forward via project knowledge).
+  finding.verdict = answer === 'bug' ? 'broke' : 'held';
+  finding.detail = `${answer === 'bug' ? 'CONFIRMED A BUG' : 'CONFIRMED FINE'} by you — "${finding.expectBroke || finding.title}". ${finding.detail}`;
+  finding.resolution = { kind: answer === 'bug' ? 'file-ticket' : 'none' };
+  (finding as any).humanConfirmed = true;
+  store.updateTestRun(req.params.runId, { artifacts: (run as any).artifacts } as any);
+  return res.json({ ok: true, verdict: finding.verdict, resolution: finding.resolution });
+});
+
+// ── ANSWER A NEEDS-INPUT (bug-repro's "which control is this step?" — closes the teach-the-app loop): the run
+// reached the feature but a step's control didn't match; the user picks the RIGHT control from the candidate list.
+// We store it as a NAVIGATIONAL fact in projectKnowledge (never an oracle/verdict — the store's whole discipline)
+// so the NEXT run resolves that step without asking again. Body: { chosenControl: "<one of the candidates>" }.
+projectsRouter.post('/:projectId/runs/:runId/answer-control', (req, res) => {
+  const run = store.getTestRun(req.params.runId);
+  if (!run) return res.status(404).json({ error: 'Run not found' });
+  const art = ((run as any).artifacts || [])[0];
+  const resolution = art?.resolution;
+  if (!resolution || resolution.kind !== 'needs-input') {
+    return res.status(409).json({ error: `this run has no needs-input to answer (resolution: ${resolution?.kind || 'none'})` });
+  }
+  const chosen = String(req.body?.chosenControl || '').trim();
+  if (!chosen) return res.status(400).json({ error: 'chosenControl required — the control that performs the step' });
+  // record the navigational fact: "for step X on this app, the control is <chosen>". Human-confirmed provenance.
+  let knowledge = store.getProjectKnowledge(req.params.projectId) || [];
+  knowledge = recordObservation(knowledge, {
+    kind: 'selector', key: `step:${resolution.forStep}`,
+    fact: `for "${resolution.forStep}", click the control "${chosen}"`,
+    provenance: 'human-confirmed',
+  }, new Date().toISOString());
+  store.setProjectKnowledge(req.params.projectId, knowledge);
+  // mark the run's resolution answered so the UI reflects it.
+  (art.resolution as any).answeredWith = chosen;
+  store.updateTestRun(req.params.runId, { artifacts: (run as any).artifacts } as any);
+  return res.json({ ok: true, learned: `for "${resolution.forStep}" → "${chosen}" (the next run will use it)` });
+});
+
 // LIST recent recorded runs for a project (so the UI can OPEN a past run instead of always re-running). Compact
 // summary only — id / kind / feature / status / finishedAt — newest first. `?kind=break-it` filters by engine.
 projectsRouter.get('/:projectId/runs', (req, res) => {
@@ -282,7 +380,16 @@ projectsRouter.get('/:projectId/runs', (req, res) => {
         : art.kind === 'bug-repro' ? (art.verdict || '')
         : art.kind === 'mission' ? `${(art.steps || []).length} step(s)`
         : r.summary || r.status || '';
-      return { id: r.id, kind: art.kind || 'run', label: art.feature || art.summary || art.kind || 'run', outcome, status: r.status, finishedAt: r.finishedAt, startedAt: r.startedAt, frameCount: (art.frames || []).length };
+      // ACTIONS PENDING (entrepreneur-lens: the history tells the user WHICH runs still need them). Count the
+      // non-'none', non-answered resolutions across the run — break-it findings + the bug-repro/mission artifact.
+      const isPending = (res: any) => res && res.kind && res.kind !== 'none' && !res.answeredWith && res.kind !== 'file-ticket';
+      // actionable rows live under `findings` (break-it/audit) OR `results` (fe-api) — scan both so an fe-api
+      // 'answer-oracle' row (or any per-row resolution) counts toward the pending badge, not just findings.
+      const rows = [...findings, ...(art.results || [])];
+      let actionsPending = rows.filter((f: any) => isPending(f.resolution)).length;
+      if (isPending(art.resolution)) actionsPending += 1;
+      if (art.kind === 'mission') actionsPending += (art.actions || []).filter((a: any) => a.kind !== 'file-ticket').reduce((n: number, a: any) => n + (a.count || 0), 0);
+      return { id: r.id, kind: art.kind || 'run', label: art.feature || art.summary || art.kind || 'run', outcome, actionsPending, status: r.status, finishedAt: r.finishedAt, startedAt: r.startedAt, frameCount: (art.frames || []).length };
     })
     .filter((r) => !kindFilter || r.kind === kindFilter)
     .sort((a, b) => String(b.finishedAt || b.startedAt || '').localeCompare(String(a.finishedAt || a.startedAt || '')))

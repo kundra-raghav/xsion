@@ -1,0 +1,12 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Delayed Form</title></head><body>
+<button id="open">Create Event</button>
+<div id="formhost"></div>
+<script>
+document.getElementById('open').addEventListener('click',function(){
+  location.hash='#create-event';               // URL CHANGES (the structural signal)
+  setTimeout(function(){                         // form renders 2s later (hydration race)
+    document.getElementById('formhost').innerHTML='<input id="t" placeholder="Enter event title"><div id="out"></div>';
+    document.getElementById('t').addEventListener('input',function(e){document.getElementById('out').textContent='TITLE='+e.target.value;});
+  },2000);
+});
+</script></body></html>

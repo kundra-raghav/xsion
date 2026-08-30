@@ -15,6 +15,7 @@ const BRIDGE = path.join(SOA_DIR, 'xsion_bridge.py');
 export interface IntentStep {
   intent: string;
   expectedOutcome?: string;
+  skipIfFilled?: boolean;   // a VALID (happy-path) fill that should KEEP an existing non-empty value rather than overwrite a form default
 }
 export interface IntentFlow {
   name: string;
@@ -137,8 +138,16 @@ export async function breakItPlan(
   repo: string,
   input: unknown
 ): Promise<{ plan: BreakStep[]; error?: string }> {
-  const res = await runBridge(['breakit', repo || '-', JSON.stringify(input)], 300_000);
-  return { plan: Array.isArray(res.plan) ? res.plan : [], error: res.error };
+  // FAIL-FAST (45s, was 300s): the SoA breakit plan is an agentic LLM call that is variance-prone — it either plans
+  // quickly or hangs the whole engine (measured: 5-min waits killed the run before the DETERMINISTIC scaffold — which
+  // now has the crawler's learned form fields — ever ran). The scaffold is the reliable coverage; SoA's plan is a
+  // bonus. On timeout, return an empty plan gracefully so the engine falls through to the scaffold, not a dead run.
+  try {
+    const res = await runBridge(['breakit', repo || '-', JSON.stringify(input)], 45_000);
+    return { plan: Array.isArray(res.plan) ? res.plan : [], error: res.error };
+  } catch (e: any) {
+    return { plan: [], error: `SoA plan skipped (${String(e?.message || e).slice(0, 60)}) — using the deterministic scaffold from the learned form fields.` };
+  }
 }
 
 export interface BugRepro {
@@ -172,11 +181,37 @@ export async function missionPlan(
   return { mission: res.mission || null, error: res.error };
 }
 
+/** GOAL-STEP (2026-08-23): the general goal-agent's per-step planner. Reuses the EXPLORE bridge verb (cmd_explore
+ *  dumps the whole pageView into the prompt — so goal/memory/lastActions carried as fields REACH the LLM with NO
+ *  cross-repo Python edit) at the SAME 45s fail-fast discipline. Returns the next intent(s) as {clicks}; the runGoal
+ *  loop maps click→'click "label"', fill→'fill "label" with "value"'. Empty/timeout → [] → the loop stops honestly. */
+export async function goalStep(
+  goal: string, observation: any, memory: any, lastActions: any[],
+): Promise<{ clicks: ExploreClick[]; vision?: boolean; error?: string }> {
+  // prepend the goal + memory into a `text` the explore prompt reads, and pass them as fields too (belt + braces).
+  const pageView = {
+    ...observation,
+    goal,
+    memory,
+    lastActions,
+    text: `GOAL: ${goal}\nMEMORY: ${JSON.stringify(memory?.facts || {})}\nLAST: ${(lastActions || []).map((a: any) => `${a.intent}→${a.verdict}`).join('; ')}\n\n${observation?.text || ''}`,
+  };
+  return explorePage(pageView);
+}
+
 export async function explorePage(
   pageView: unknown
 ): Promise<{ clicks: ExploreClick[]; vision?: boolean; error?: string }> {
-  const res = await runBridge(['explore', JSON.stringify(pageView)], 150_000);
-  return { clicks: Array.isArray(res.clicks) ? res.clicks : [], vision: !!res.vision, error: res.error };
+  // FAIL-FAST (2026-08-22): explore is an ON-STALL crawl-depth AID, never a critical-path dependency (see the
+  // "SoA/LLM is NEVER on the critical path" rule in CRAWLER_WORLDMODEL_DESIGN.md). It used to block 150s/call and,
+  // with stall+plateau caps of 3+4, could stack to ~17.5 min and HANG a run. Cap at 45s and degrade to an empty
+  // action list on timeout/error so the crawl loop simply continues deterministically instead of blocking.
+  try {
+    const res = await runBridge(['explore', JSON.stringify(pageView)], 45_000);
+    return { clicks: Array.isArray(res.clicks) ? res.clicks : [], vision: !!res.vision, error: res.error };
+  } catch (e: any) {
+    return { clicks: [], vision: false, error: `explore skipped (${e?.message || 'timeout'})` };
+  }
 }
 
 export interface AuditProbe {

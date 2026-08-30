@@ -1,0 +1,104 @@
+<!doctype html>
+<!--
+  calendar-dnd.html — a CONTROLLED fixture for the drop-precision oracle. A single day-column with two events of
+  DIFFERENT heights (a long one + a short one) plus a draggable "new" event. Ground truth is exact and under our
+  control via ?mode=:
+    ?mode=correct  → the drop is honored: the event lands wherever you release it (between / below).
+    ?mode=buggy    → reproduces the ticket: the event ALWAYS snaps to just below the long event, ignoring the drop y.
+  This is the only place we can prove the oracle reports BOTH reproduced (buggy) and not-reproduced (correct)
+  against a known answer, before trusting it on the live app.
+-->
+<html>
+<head><meta charset="utf-8"><title>Calendar DnD fixture</title>
+<style>
+  body { font: 14px system-ui, sans-serif; margin: 24px; }
+  #day { position: relative; width: 220px; border: 1px solid #ccc; padding: 8px; min-height: 420px; }
+  .event { box-sizing: border-box; width: 100%; margin: 4px 0; padding: 6px 8px; border-radius: 6px; color: #fff; cursor: grab; user-select: none; }
+  .long  { background: #2563eb; height: 120px; }
+  .short { background: #16a34a; height: 40px; }
+  .newev { background: #db2777; height: 40px; }
+  h3 { margin: 0 0 8px; }
+</style>
+</head>
+<body>
+  <h3>Monday</h3>
+  <div id="day"></div>
+
+  <script>
+    // NO named helpers referenced from page.evaluate — this is plain page script, unrelated to the oracle's evaluate.
+    var params = new URLSearchParams(location.search);
+    // modes: correct (honors exact drop y) | buggy (always below long event) | snap (correct but rounds to the
+    // nearest slot boundary — a benign behavior the two-aim differential must NOT flag as the bug).
+    var mode = params.get('mode');
+    if (mode !== 'buggy' && mode !== 'snap') mode = 'correct';
+    var day = document.getElementById('day');
+
+    // three events, each with a STABLE data-testid so the oracle can match before→after.
+    // evt-new starts at the TOP so a drop-to-bottom is a REAL move (order changes) — otherwise "correct" would be a
+    // no-op (event already last) and indistinguishable from a swallowed drag. Order: new, long, short.
+    var DEFAULT_ORDER = [
+      { id: 'evt-new',   label: 'New event',          cls: 'newev' },
+      { id: 'evt-long',  label: 'Long meeting (2h)', cls: 'long' },
+      { id: 'evt-short', label: 'Short standup',      cls: 'short' },
+    ];
+    // ?persist=1 makes the drop STICK across reload (via sessionStorage) — mimics a real backend-persisting calendar.
+    // The oracle's reset (a reload) then does NOT restore order, so its two-aim comparability assertion must fire and
+    // return inconclusive (never a false verdict). This is the case the fixture's plain reload used to mask.
+    var persist = params.get('persist') === '1';
+    var events;
+    if (persist) {
+      var saved = null; try { saved = JSON.parse(sessionStorage.getItem('xsion-cal-order') || 'null'); } catch (e) {}
+      events = (saved && saved.length === 3) ? saved.map(function (id) { return DEFAULT_ORDER.find(function (e) { return e.id === id; }); }) : DEFAULT_ORDER.slice();
+    } else {
+      events = DEFAULT_ORDER.slice();
+    }
+    function render() {
+      day.innerHTML = '';
+      events.forEach(function (e) {
+        var el = document.createElement('div');
+        el.className = 'event ' + e.cls;
+        el.setAttribute('data-testid', e.id);
+        el.textContent = e.label;
+        day.appendChild(el);
+      });
+      wireDrag();
+    }
+
+    // a minimal custom DnD (mimics a calendar lib: mousedown on an event → mousemove → mouseup reorders it).
+    var dragging = null, startY = 0;
+    function wireDrag() {
+      day.querySelectorAll('.event').forEach(function (el) {
+        el.addEventListener('mousedown', function (ev) { dragging = el.getAttribute('data-testid'); startY = ev.clientY; ev.preventDefault(); });
+      });
+    }
+    document.addEventListener('mouseup', function (ev) {
+      if (!dragging) return;
+      var dropY = ev.clientY;
+      var draggedId = dragging;
+      dragging = null;
+      // reorder `events` array based on mode.
+      var others = events.filter(function (e) { return e.id !== draggedId; });
+      var dragged = events.find(function (e) { return e.id === draggedId; });
+      if (mode === 'buggy') {
+        // THE BUG: always place the dragged event immediately AFTER the long event, ignoring dropY.
+        var out = [];
+        others.forEach(function (e) { out.push(e); if (e.id === 'evt-long') out.push(dragged); });
+        if (out.indexOf(dragged) === -1) out.unshift(dragged);
+        events = out;
+      } else {
+        // CORRECT / SNAP: insert the dragged event at the slot matching dropY, measured against the others' rendered
+        // boxes. (SNAP behaves identically at whole-event granularity here — its point is that DIFFERENT aims still
+        // land at DIFFERENT slots, which the differential reads as "honored", unlike the buggy always-same-slot.)
+        var boxes = others.map(function (e) { var n = day.querySelector('[data-testid="' + e.id + '"]'); var r = n.getBoundingClientRect(); return { id: e.id, mid: r.top + r.height / 2 }; });
+        var slot = 0;
+        for (var i = 0; i < boxes.length; i++) { if (dropY > boxes[i].mid) slot++; else break; }
+        var out2 = others.slice(); out2.splice(slot, 0, dragged); events = out2;
+      }
+      if (persist) { try { sessionStorage.setItem('xsion-cal-order', JSON.stringify(events.map(function (e) { return e.id; }))); } catch (e) {} }
+      render();
+    });
+
+    render();
+  </script>
+</body>
+</html>

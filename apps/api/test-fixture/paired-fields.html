@@ -1,0 +1,14 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Paired Fields</title></head><body>
+<h1>Set Time</h1>
+<!-- mirrors schooltalk: two identical-placeholder type=tel inputs, distinguished ONLY by a sibling <p> label -->
+<div><p>Start time</p><input type="tel" placeholder="hh:mm (a|p)m"></div>
+<div><p>End Time</p><input type="tel" placeholder="hh:mm (a|p)m"></div>
+<div id="out"></div>
+<script>
+document.querySelectorAll('input').forEach(function(inp){
+  inp.addEventListener('input', function(){
+    var lbl = inp.parentElement.querySelector('p').textContent;
+    document.getElementById('out').textContent = 'LAST FILLED: '+lbl+' = '+inp.value;
+  });
+});
+</script></body></html>

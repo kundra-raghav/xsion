@@ -17,7 +17,11 @@
  *     than being trusted harder; enough failures expire it. Self-correcting, so stale structure can't mislead forever.
  */
 
-export type KnowledgeKind = 'gate' | 'route' | 'selector' | 'load-quirk' | 'nav-hint';
+// environment-state = a PERISHABLE OBSERVATION about what's present on a reached page (e.g. "this calendar day-window
+// has no events"). It is STRUCTURE/CONTENT, not oracle truth — it says WHAT IS ON THE PAGE, never whether the app is
+// CORRECT. Safety rule (advisor): it may INFORM + EXPLAIN + order what to check first, but must NEVER let a run skip
+// the live observation. Every run still snapshots; a contradicting snapshot invalidates the fact via recordContradiction.
+export type KnowledgeKind = 'gate' | 'route' | 'selector' | 'load-quirk' | 'nav-hint' | 'environment-state';
 export type Provenance = 'observed' | 'human-confirmed';
 
 export interface KnowledgeEntry {

@@ -15,6 +15,8 @@ import { store } from '../store';
 import { makeFrameHook } from './liveFrame';
 import { executeFlow, EnvCondition } from './intentRunner';
 import type { IntentFlow } from './soaClient';
+import { honestStatus, recordError } from './recordHonesty';
+import { preflightAuth } from './authGate';
 
 export type TestEvent =
   | { type: 'test:phase'; phase: 'start' | 'run' | 'done'; label: string; kind: string }
@@ -44,12 +46,13 @@ export function startEnvMatrix(projectId: string, baseUrl: string, flowId?: stri
   runMatrix(runId, projectId, baseUrl, flowId, conditionIds).catch((e) => {
     emit(runId, { type: 'test:think', message: `matrix error: ${String(e.message || e)}` });
     emit(runId, { type: 'test:phase', phase: 'done', label: 'Run failed', kind: 'env' });
-    store.updateTestRun(runId, { status: 'failed', finishedAt: new Date().toISOString() });
+    recordError(runId, 'env-matrix', e, 'The environment matrix could not run');
   });
   return runId;
 }
 
 async function runMatrix(runId: string, projectId: string, baseUrl: string, flowId?: string, conditionIds?: string[]) {
+  console.log(`[XSION][env-matrix] START run=${runId.slice(0,8)} project=${projectId} url=${baseUrl} flowId=${flowId||'(auto)'} conditions=${(conditionIds||[]).join(',')||'(all)'}`);
   const map = store.getProjectMap(projectId);
   emit(runId, { type: 'test:phase', phase: 'start', label: 'Preparing the environment matrix', kind: 'env' });
 
@@ -57,12 +60,29 @@ async function runMatrix(runId: string, projectId: string, baseUrl: string, flow
   // pick the flow: by id, else the most-substantive high-confidence flow (same choice the other services make)
   const flow = pickFlow(flows, flowId);
   if (!flow) {
-    emit(runId, { type: 'test:think', message: 'No suitable flow in the map to run — crawl + map the app first.' });
+    const msg = 'No named flow in the crawl map to run under environment conditions — the crawl recorded pages but synthesized no flows for this app. Re-crawl (or map with the codebase) to get runnable flows first.';
+    emit(runId, { type: 'test:think', message: msg });
     emit(runId, { type: 'test:phase', phase: 'done', label: 'No flow', kind: 'env' });
     emit(runId, { type: 'test:done', passed: 0, failed: 0, skipped: 0, total: 0 });
-    store.updateTestRun(runId, { status: 'passed', finishedAt: new Date().toISOString() });
+    // persist an HONEST artifact — nothing ran, so status is NOT 'passed' (green must mean verified-working, and
+    // zero conditions executed here). resolution: unreachable (re-crawl to get flows).
+    store.updateTestRun(runId, { status: 'failed', finishedAt: new Date().toISOString(), artifacts: [{ kind: 'env-matrix', results: [], detail: msg, resolution: { kind: 'unreachable' } } as any] } as any);
     return;
   }
+  // PRE-FLIGHT AUTH GATE: if the app is login-gated and we have no working creds, running the flow under each
+  // condition would just exercise the login screen N times and report honest-looking failures. Refuse once instead.
+  const project = store.getProject(projectId) as any;
+  const creds = project?._defaultCreds as { email?: string; password?: string } | undefined;
+  const gate = await preflightAuth(baseUrl, creds);
+  if (gate.blocked) {
+    emit(runId, { type: 'test:think', message: gate.message });
+    emit(runId, { type: 'test:phase', phase: 'done', label: 'Blocked at login', kind: 'env' });
+    emit(runId, { type: 'test:done', passed: 0, failed: 0, skipped: 0, total: 0 });
+    store.updateTestRun(runId, { status: 'failed', finishedAt: new Date().toISOString(),
+      artifacts: [{ kind: 'env-matrix', results: [], detail: gate.message, resolution: { kind: 'credentials' } } as any] } as any);
+    return;
+  }
+
   const intentFlow: IntentFlow = { name: flow.name, role: flow.role, steps: flow.steps };
   emit(runId, { type: 'test:think', message: `Running “${flow.name}” (${flow.steps.length} steps) under each environment condition.` });
 
@@ -111,7 +131,10 @@ async function runMatrix(runId: string, projectId: string, baseUrl: string, flow
     }
   }
 
-  store.updateTestRun(runId, { status: 'passed', finishedAt: new Date().toISOString(), artifacts: [{ kind: 'env-matrix', flow: flow.name, results, frames: frameHook.frames } as any] } as any);
+  const detail = `"${flow.name}" run under ${conditions.length} conditions — ${passed} passed · ${failed} failed · ${unver} needs-review.`;
+  // HONEST status: a condition that failed makes the run 'failed', not green. (unver alone stays passed — needs-review
+  // is not a failure, but any hard fail is.) Nothing-ran is impossible here (we had a flow + ≥1 condition).
+  store.updateTestRun(runId, { status: honestStatus(passed, failed, conditions.length), finishedAt: new Date().toISOString(), artifacts: [{ kind: 'env-matrix', flow: flow.name, results, detail, frames: frameHook.frames } as any] } as any);
   emit(runId, { type: 'test:phase', phase: 'done', label: 'Matrix complete', kind: 'env' });
   emit(runId, { type: 'test:think', message: `Matrix done — ${passed} passed, ${failed} failed, ${unver} needs-review across ${conditions.length} conditions.` });
   emit(runId, { type: 'test:done', passed, failed, skipped: unver, total: conditions.length });

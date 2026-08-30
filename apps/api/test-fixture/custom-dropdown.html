@@ -1,0 +1,15 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Custom Dropdown</title></head><body>
+<h1>Pick Status</h1>
+<div id="trigger" role="combobox" aria-haspopup="listbox" aria-expanded="false" tabindex="0" style="border:1px solid #ccc;padding:8px;width:200px;cursor:pointer">Select status…</div>
+<div id="out"></div>
+<script>
+var opts=['Active','Pending','Archived'];var menu=null;
+document.getElementById('trigger').addEventListener('click',function(){
+  if(menu){menu.remove();menu=null;return;}
+  menu=document.createElement('ul');menu.setAttribute('role','listbox');
+  opts.forEach(function(o){var li=document.createElement('li');li.setAttribute('role','option');li.textContent=o;
+    li.addEventListener('click',function(e){e.stopPropagation();document.getElementById('trigger').textContent=o;document.getElementById('out').textContent='SELECTED: '+o;menu.remove();menu=null;});
+    menu.appendChild(li);});
+  document.body.appendChild(menu);
+});
+</script></body></html>

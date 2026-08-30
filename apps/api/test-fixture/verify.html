@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Xsion Verify Fixture</title>
+<style>
+  body { font-family: system-ui; margin: 0; }
+  .topbar { padding: 12px; background: #222; color: #fff; display: flex; gap: 8px; }
+  .topbar a, .topbar button { color: #fff; background: #444; border: 0; padding: 6px 10px; cursor: pointer; text-decoration: none; border-radius: 4px; }
+  .view { padding: 20px; display: none; }
+  .view.active { display: block; }
+  .row { padding: 10px; border-bottom: 1px solid #eee; }
+  button, a.btn { padding: 6px 12px; margin: 4px; cursor: pointer; }
+  .danger { background: #c0392b; color: #fff; }
+</style>
+</head>
+<body>
+<!-- GROUND TRUTH (verifiable): 4 nav routes (home/list/settings/checkout) via hash. Each view has a KNOWN affordance
+     count. Dangerous controls: "Delete account"(POST form), "Send Broadcast"(POST), "Pay $49"(POST), "Log out". Safe
+     look-alikes that MUST be demoted: "Clear filters"(GET form), "Cancel", "Delete draft"(same-origin <a href>). The
+     #list view lazy-appends 200 rows on scroll, all of ONE kind ("Item #N") → normalized-kind saturation after 1 kind. -->
+<div class="topbar">
+  <a href="#home" id="nav-home">Home</a>
+  <a href="#list" id="nav-list">List</a>
+  <a href="#settings" id="nav-settings">Settings</a>
+  <a href="#checkout" id="nav-checkout">Checkout</a>
+</div>
+
+<!-- HOME: 3 safe affordances -->
+<div class="view active" id="home">
+  <h1>Home</h1>
+  <button id="h1">View Reports</button>
+  <button id="h2">Open Dashboard</button>
+  <a class="btn" href="#list">Browse List</a>
+</div>
+
+<!-- LIST: an infinite-scroll list. one KIND of row ("Item #N"). Safe controls + one demote-me GET-form search. -->
+<div class="view" id="list">
+  <h1>List</h1>
+  <form method="get"><input placeholder="search"><button id="clearBtn">Clear filters</button></form>
+  <div id="rows"></div>
+</div>
+
+<!-- SETTINGS: mix of safe + DANGEROUS. Delete-account POSTs; Delete-draft is a safe <a href> link; Cancel is safe. -->
+<div class="view" id="settings">
+  <h1>Settings</h1>
+  <button id="s1">Edit Profile</button>
+  <button id="s2">Update Preferences</button>
+  <a class="btn" href="#home" id="s-draft">Delete draft</a>
+  <button id="s-cancel">Cancel</button>
+  <form method="post" action="/api/delete"><button class="danger" id="s-del" type="submit">Delete account</button></form>
+  <form method="post" action="/api/broadcast"><button class="danger" id="s-send" type="submit">Send Broadcast</button></form>
+  <button class="danger" id="s-logout">Log out</button>
+</div>
+
+<!-- CHECKOUT: a payment form. Pay POSTs (dangerous). Apply-coupon is a GET (safe). -->
+<div class="view" id="checkout">
+  <h1>Checkout</h1>
+  <form method="get"><input placeholder="coupon"><button id="c-coupon">Apply coupon</button></form>
+  <form method="post" action="/api/pay"><button class="danger" id="c-pay" type="submit">Pay $49</button></form>
+</div>
+
+<script>
+  // hash-router: 4 states
+  function route() {
+    var h = (location.hash || '#home').slice(1);
+    document.querySelectorAll('.view').forEach(function(v){ v.classList.toggle('active', v.id === h); });
+    if (h === 'list') fillRows(0);
+  }
+  window.addEventListener('hashchange', route);
+  // INFINITE SCROLL: append 25 rows at a time on scroll-near-bottom, up to 200. All ONE kind ("Item #N").
+  var rowCount = 0;
+  function fillRows(_) {
+    var rows = document.getElementById('rows');
+    if (!rows.children.length) { rowCount = 0; addRows(25); }
+  }
+  function addRows(n) {
+    var rows = document.getElementById('rows');
+    for (var i = 0; i < n && rowCount < 200; i++) {
+      rowCount++;
+      var d = document.createElement('div');
+      d.className = 'row'; d.setAttribute('data-id', 'row-' + rowCount);
+      d.textContent = 'Item #' + rowCount;   // ONE kind — digits normalize to "item #"
+      rows.appendChild(d);
+    }
+  }
+  window.addEventListener('scroll', function () {
+    if (location.hash !== '#list') return;
+    if (window.innerHeight + window.scrollY >= document.body.offsetHeight - 100) addRows(25);
+  });
+  route();
+</script>
+</body>
+</html>

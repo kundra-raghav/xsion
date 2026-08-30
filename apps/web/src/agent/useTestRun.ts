@@ -23,6 +23,8 @@ export interface BugReport {
   expectedBehavior: string; actualBehavior: string; interaction: string;
   codeAssessment: string | null; codeRef: string | null; openQuestion: string | null; detail: string;
   stepsRun: { intent?: string; status: string; note?: string }[];
+  /** the NEXT ACTION for a non-terminal verdict — the "approve button" that turns a dead-end into a step forward. */
+  resolution?: { kind: 'file-ticket' | 'none' | 'credentials' | 'needs-input' | 'unreachable' | 'authorize'; question?: string; forStep?: string; candidates?: string[] };
 }
 
 export interface TestState {
@@ -93,6 +95,11 @@ export function useTestRun() {
     return () => ws.close();
   }, [runId, handle]);
 
+  // WATCH an EXISTING run (e.g. a mission's sub-run) — subscribe to its live frames + events without starting one.
+  // The WS effect above re-subscribes on runId change; this just points us at the sub-run so its test:frame stream
+  // (screenshot/url/label) flows into state.live and TestBrowserStage can render the live browser inline.
+  const watch = useCallback((rid: string | null) => { setState({ ...EMPTY }); setRunId(rid); }, []);
+
   const start = useCallback(async (path: string, body: any) => {
     setState({ ...EMPTY });
     const res = await fetch(`${API}/api/projects/${body.projectId}/${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -132,11 +139,27 @@ export function useTestRun() {
         setState({ ...EMPTY, kind: 'flow', phase: 'done', frames });
         setRunId(rid); return 'flow';
       }
+      // API test + FE→API matching: replay-able as items (label/status/detail per row). Both store `results[]`.
+      if (art.kind === 'api' || art.kind === 'fe-api') {
+        setState({ ...EMPTY, kind: art.kind, phase: 'done', frames,
+          items: (art.results || []).map((r: any, i: number) => ({ index: i, title: r.title || r.action || `item ${i + 1}`, status: r.status || (r.verdict === 'match' ? 'pass' : r.verdict === 'mismatch' ? 'fail' : r.verdict === 'unverifiable' ? 'unverifiable' : r.verdict), detail: r.detail || r.reasoning })) });
+        setRunId(rid); return art.kind;
+      }
+      // Generate test cases: the authored cases are the record.
+      if (art.kind === 'test-cases') {
+        setState({ ...EMPTY, kind: 'generate', phase: 'done', frames, cases: art.cases || [] });
+        setRunId(rid); return 'test-cases';
+      }
+      // Security audit: findings list.
+      if (art.kind === 'security-audit') {
+        setState({ ...EMPTY, kind: 'security-audit', phase: 'done', frames, findings: art.findings || [] });
+        setRunId(rid); return 'security-audit';
+      }
       // any other kind with frames → at least show the playback
       if (frames.length) { setState({ ...EMPTY, kind: art.kind || 'run', phase: 'done', frames }); setRunId(rid); return art.kind || 'run'; }
       return null;
     } catch { return null; }
   }, []);
 
-  return { state, runId, start, loadRecorded };
+  return { state, runId, start, watch, loadRecorded };
 }

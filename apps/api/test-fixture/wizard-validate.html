@@ -1,0 +1,26 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Validating Wizard</title></head><body>
+<h1>Create Event</h1>
+<div class="step" data-i="0" style="display:block">
+  <input id="title" placeholder="Enter event title">
+  <button id="next">Next</button>
+  <span id="err0"></span>
+</div>
+<div class="step" data-i="1" style="display:none">
+  <input id="notes" placeholder="Notes">
+  <button id="create">Create</button>
+</div>
+<div id="out"></div>
+<script>
+document.getElementById('next').addEventListener('click',function(){
+  var t=document.getElementById('title');
+  if(!t.value.trim()){ t.setAttribute('aria-invalid','true'); document.getElementById('err0').textContent='Title required'; return; } // REGRESSED if empty
+  t.removeAttribute('aria-invalid');
+  document.querySelector('[data-i="0"]').style.display='none';
+  document.querySelector('[data-i="1"]').style.display='block';  // ADVANCE: new field appears
+});
+document.getElementById('create').addEventListener('click',function(){
+  document.querySelector('[data-i="1"]').style.display='none';   // form gone
+  location.hash='#done';                                          // corroboration: url changed
+  document.getElementById('out').innerHTML='<table><tr><td>EVENT CREATED</td></tr></table>'; // + row increased
+});
+</script></body></html>

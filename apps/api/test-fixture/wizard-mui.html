@@ -1,0 +1,31 @@
+<!doctype html><html><head><meta charset="utf-8"><title>MUI Wizard (realistic)</title>
+<style>.tabs button{padding:8px}.panel{display:none}.panel.active{display:block}</style></head><body>
+<h1>Create Event</h1>
+<div class="tabs MuiBox-root">
+  <button class="MuiBox-root">Set Learning &amp; Schedule</button>
+  <button class="MuiBox-root">Select Teachers</button>
+  <button class="MuiBox-root">Planning</button>
+</div>
+<div class="panel active" data-i="0">
+  <input id="title" placeholder="Enter event title"><input id="time" placeholder="hh:mm (a|p)m">
+  <button class="adv" data-to="1">Save time slot</button>   <!-- ADVANCE button, like real schooltalk -->
+</div>
+<div class="panel" data-i="1">
+  <input id="teacher" placeholder="Search teacher name">
+  <button class="adv" data-to="2">Save &amp; Continue</button>
+</div>
+<div class="panel" data-i="2">
+  <input id="notes" placeholder="Notes">
+  <button id="create">Create Event</button>
+</div>
+<div id="out"></div>
+<script>
+function show(i){document.querySelectorAll('.panel').forEach(p=>p.classList.toggle('active',+p.dataset.i===i));}
+document.querySelectorAll('.tabs button').forEach((b,i)=>b.addEventListener('click',()=>show(i)));
+document.querySelectorAll('.adv').forEach(b=>b.addEventListener('click',()=>show(+b.dataset.to)));
+document.getElementById('create').addEventListener('click',function(){
+  document.querySelectorAll('.panel').forEach(p=>p.style.display='none');
+  location.hash='#done';
+  document.getElementById('out').innerHTML='<table><tr><td>EVENT CREATED</td></tr></table>';
+});
+</script></body></html>

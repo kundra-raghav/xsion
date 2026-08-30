@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Hub Fixture (A/B)</title>
+<style>body{font-family:system-ui;margin:0}.topbar{padding:12px;background:#222}.topbar a{color:#fff;margin-right:10px}
+.view{padding:20px;display:none}.view.active{display:block}.row{padding:8px;border-bottom:1px solid #eee}</style>
+</head>
+<body>
+<!-- GROUND TRUTH for the A/B measurement:
+     - 12 DISTINCT-STATE routes: #dash, #users, #orders, #plans, #reports, #chats, #settings, #billing, #audit,
+       #alerts, #teams, #files — each renders a DIFFERENT structure (different affordance labels + landmark counts)
+       so each gets a UNIQUE sig.
+     - PLUS 8 DUPLICATE routes #dup1..#dup8 that all render the SAME structure as #dash (same sig → collapse).
+     Total 20 hash-routes off the hub, but only 13 distinct states (hub + 12).
+     The hub lists the duplicates FIRST (so a naive FIFO/bfs spends early budget on them), then the distinct ones.
+     Under a BUDGET < 20, curiosity (novelty-ranked) should reach MORE distinct states than bfs (which drains dups first). -->
+<div class="topbar" id="nav"></div>
+<div id="views"></div>
+<script>
+  // duplicates listed FIRST (bfs-FIFO trap), then the 12 distinct states
+  var DUP = ['dup1','dup2','dup3','dup4','dup5','dup6','dup7','dup8'];
+  var DISTINCT = ['users','orders','plans','reports','chats','settings','billing','audit','alerts','teams','files','dash'];
+  var ALL = DUP.concat(DISTINCT);
+  var nav = document.getElementById('nav');
+  ALL.forEach(function(r){ var a=document.createElement('a'); a.href='#'+r; a.textContent=r; a.id='nav-'+r; nav.appendChild(a); });
+  var views = document.getElementById('views');
+  // build a view per route. dups + dash all share ONE structure; each distinct route has its own affordance set.
+  function makeView(id, kind){
+    var v=document.createElement('div'); v.className='view'; v.id=id;
+    var h=document.createElement('h1'); h.textContent=kind; v.appendChild(h);
+    // each DISTINCT kind gets a unique set of buttons (→ unique sig); dups/dash share the generic set.
+    var btns = (DISTINCT.indexOf(kind)>=0 && kind!=='dash')
+      ? [kind+' Create', kind+' Filter', kind+' Export', kind+' Refresh']   // unique per distinct kind
+      : ['Home Widget A','Home Widget B','Home Widget C'];                    // shared generic (dash + all dups)
+    btns.forEach(function(t){ var b=document.createElement('button'); b.textContent=t; v.appendChild(b); });
+    views.appendChild(v);
+  }
+  DUP.forEach(function(d){ makeView(d,'dash'); });          // dups render as 'dash' structure
+  DISTINCT.forEach(function(d){ makeView(d,d); });
+  function route(){ var h=(location.hash||'#dash').slice(1); document.querySelectorAll('.view').forEach(function(v){v.classList.toggle('active',v.id===h);}); }
+  window.addEventListener('hashchange', route); route();
+</script>
+</body>
+</html>

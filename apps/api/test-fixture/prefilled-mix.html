@@ -1,0 +1,11 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Prefilled Mix</title></head><body>
+<h1>Form</h1>
+<label>Start time <input id="time" value="09:00 AM"></label><br><br>
+<label>Event name <input id="name" placeholder="Event name"></label><br><br>
+<button id="save">Save</button><div id="out"></div>
+<script>
+document.getElementById('save').addEventListener('click',function(){
+  var t=document.getElementById('time').value, n=document.getElementById('name').value;
+  document.getElementById('out').textContent='SAVED time='+t+' name='+n;
+});
+</script></body></html>

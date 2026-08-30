@@ -1,5 +1,6 @@
 import fs from 'fs/promises';
 import path from 'path';
+import { planStaleRunReconciliation } from './reconcileStaleRuns';
 import type {
   Project,
   DiscoveryRun,
@@ -123,6 +124,12 @@ export class DataStore {
         ])
       );
 
+      // ★ RECONCILE ORPHANED RUNS: any testRun still 'running' at load is orphaned (in-memory drivers don't survive a
+      // restart) → mark failed+interrupted with an honest harness-not-app reason. Fixes the crash-but-stays-running lie.
+      const stale = planStaleRunReconciliation(Array.from(this.testRuns.values()), new Date().toISOString());
+      for (const { id, patch } of stale) { const r = this.testRuns.get(id); if (r) this.testRuns.set(id, { ...r, ...patch } as any); }
+      if (stale.length) { console.log(`♻️  Reconciled ${stale.length} orphaned run(s) (were 'running' at boot → failed+interrupted)`); this.persist(); }
+
       console.log('📂 Data loaded from db.json');
     } catch (error) {
       // File doesn't exist or is invalid - start fresh
@@ -233,6 +240,10 @@ export class DataStore {
   deleteProject(id: string): boolean {
     const deleted = this.projects.delete(id);
     if (deleted) {
+      // cascade: a deleted project must not leave orphaned map/history/test-runs behind.
+      this.projectMaps.delete(id);
+      this.mapHistory.delete(id);
+      for (const [rid, r] of this.testRuns) if ((r as any).projectId === id) this.testRuns.delete(rid);
       this.persist();
     }
     return deleted;

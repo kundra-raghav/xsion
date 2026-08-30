@@ -1,0 +1,24 @@
+<!doctype html><html><head><meta charset="utf-8"><title>ARIA Autocomplete</title></head><body>
+<h1>Assign</h1>
+<!-- an ALWAYS-PRESENT static list (like schooltalk's "No X found") — filling the plain title must NOT touch this -->
+<input id="title" placeholder="Enter title">
+<ul id="static"><li>Recently viewed</li><li>Favorites</li></ul>
+<!-- the real autocomplete: options render into [role=listbox] AFTER typing -->
+<label>Assignee <input id="who" placeholder="Search person" role="combobox" aria-controls="lb" aria-expanded="false"></label>
+<ul id="lb" role="listbox"></ul>
+<div id="out"></div>
+<script>
+var people=['Alice Adams','Bob Brown','sushant chadha','Carol Chen'];
+document.getElementById('who').addEventListener('input',function(e){
+  var q=e.target.value.toLowerCase(); var lb=document.getElementById('lb');
+  setTimeout(function(){   // async populate (~600ms) — the timing case
+    lb.innerHTML='';
+    people.filter(p=>p.toLowerCase().includes(q)).forEach(function(p){
+      var li=document.createElement('li'); li.setAttribute('role','option'); li.textContent=p;
+      li.addEventListener('click',function(){ document.getElementById('out').textContent='PICKED: '+p; e.target.value=p; });
+      lb.appendChild(li);
+    });
+    document.getElementById('who').setAttribute('aria-expanded','true');
+  },600);
+});
+</script></body></html>

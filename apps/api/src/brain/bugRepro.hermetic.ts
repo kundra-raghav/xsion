@@ -5,8 +5,8 @@
  * PHASE 1 (pre-fix, documentation): reconstruct the user's exact scenario and CONFIRM which branch fired.
  * PHASE 2 (post-fix): the sequence gate must turn it into cant-perform, and genuine reproductions must still pass.
  */
-import { judgeRepro, reproNeedsLogin, detectSSO, detectInterstitial } from './bugReproService';
-import { shouldRecover, filterRecoveryActions, scoreCandidate, contentWords } from './intentRunner';
+import { judgeRepro, reproNeedsLogin, detectSSO, detectInterstitial, needsDropPrecision, deriveBugReproResolution, pickDropSourceId, pickColumnHint } from './bugReproService';
+import { shouldRecover, filterRecoveryActions, scoreCandidate, contentWords, looksLikeClause } from './intentRunner';
 
 // the user's real ticket (schooltalk lesson-date persistence)
 const repro: any = {
@@ -185,6 +185,57 @@ ok('recovery does NOT fire once the per-run cap is reached', shouldRecover({ con
   const addLesson = scoreCandidate(contentWords('click Add Lesson to create lesson 2'), cand('Add Lesson'));
   const bareAdd = scoreCandidate(contentWords('click Add Lesson to create lesson 2'), cand('Add'));
   ok('"Add Lesson" outranks a bare "Add"', addLesson > bareAdd, `${addLesson} vs ${bareAdd}`);
+}
+
+// ── THE DRAG-AND-DROP TICKET (user, live): a calendar drop-PRECISION bug. Three defects the run exposed. ──
+{
+  // the user's real ticket: "the dropped event always attaches just below the long event… should attach where dropped
+  // (beneath the second event or between events)". This is a DROP-POSITION bug.
+  const dndRepro: any = {
+    interaction: 'native drag-and-drop',
+    expectedBehavior: 'The event should attach at the position where it was dropped (below the second event or between events).',
+    actualBehavior: 'The event always attaches just below the long event, regardless of the drop position.',
+  };
+
+  // (1) MOAT GUARD: our center-drop-no-readback executor CANNOT judge a drop-precision bug → must be a capability gap,
+  // never a fabricated 'reproduced'. This is the "one false hard-signal finding burns trust forever" rule.
+  ok('drop-precision bug is DETECTED as a capability gap', needsDropPrecision(dndRepro) === true);
+  ok('drop-precision → judgeRepro is cant-perform (NEVER a false reproduced)', judgeRepro(dndRepro, [], [], '') === 'cant-perform');
+  // even if a center-drop "executed" and the page happens to show the buggy words, we still refuse to claim reproduced:
+  const withExecutedDrag = [{ status: 'pass', attempts: [{ kind: 'drag', matched: 1 }] }];
+  ok('drop-precision STILL cant-perform even with an executed drag + matching page text',
+    judgeRepro(dndRepro, withExecutedDrag, [], 'the event attached just below the long event regardless of drop position') === 'cant-perform');
+  // a PLAIN drag ticket (not about position) is NOT swept up — only precision language triggers the gap.
+  const plainDrag: any = { interaction: 'drag-and-drop', expectedBehavior: 'the file uploads', actualBehavior: 'nothing happens when you drop the file' };
+  ok('a non-precision drag ticket does NOT trip the capability gap', needsDropPrecision(plainDrag) === false);
+
+  // (2) RESOLUTION: a drop-precision cant-perform resolves to needs-input (honest capability gap), NOT unreachable/dead-end.
+  const res = deriveBugReproResolution('cant-perform', { needsCreds: false, loginWall: false, isSSO: false, stepResults: [], flowSteps: [], dropPrecision: true });
+  ok('drop-precision resolution = needs-input (a next action, not a dead end)', res.kind === 'needs-input', res.kind);
+  ok('drop-precision resolution names the capability honestly', /read-back|coordinate|capability/i.test(res.question || ''));
+
+  // (3) AUTHORIZE path: when mutating steps were SKIPPED for lack of authorization, resolution = authorize (approve button).
+  const authSkipSteps = [{ status: 'unverifiable', note: 'SKIPPED mutating step (not authorized): drag the new event onto the calendar' }];
+  const authRes = deriveBugReproResolution('cant-perform', { needsCreds: false, loginWall: false, isSSO: false, stepResults: authSkipSteps, flowSteps: [] });
+  ok('auth-skip resolves to AUTHORIZE (the approve-&-re-run button)', authRes.kind === 'authorize', authRes.kind);
+
+  // (4) ORACLE SEEDING: pick the dragged event + column hint from the ticket text.
+  ok('pickDropSourceId defaults to "New event" for the ticket', pickDropSourceId(dndRepro) === 'New event', pickDropSourceId(dndRepro));
+  const quotedRepro: any = { ...dndRepro, actualBehavior: 'the "Math Class" event attaches below the long event' };
+  ok('pickDropSourceId prefers a quoted event name', pickDropSourceId(quotedRepro) === 'Math Class', pickDropSourceId(quotedRepro));
+  ok('pickColumnHint finds a weekday in the ticket', pickColumnHint({ ...dndRepro } as any, 'Open the calendar on Monday and drag') === 'Monday', String(pickColumnHint(dndRepro as any, 'on Monday')));
+  ok('pickColumnHint returns undefined when no day is named', pickColumnHint(dndRepro, 'no day here') === undefined);
+}
+
+// ── CLAUSE GUARD: the split-gesture bug — step 6 "release the event at that drop position and observe its final
+// placement" became the drag SOURCE. A verb-bearing continuation clause must be rejected, not fed to bestMatch. ──
+{
+  ok('the exact failing tail is rejected as a clause, not an element',
+    looksLikeClause('event at that drop position and observe its final placement') === true);
+  ok('"release … and observe" (instruction verbs) is a clause', looksLikeClause('release the event at the drop position') === true);
+  ok('a real short element label is NOT a clause', looksLikeClause('Create Event') === false);
+  ok('a 2-word control name is NOT a clause', looksLikeClause('Lesson 2') === false);
+  ok('an empty/whitespace source is treated as a (unusable) clause', looksLikeClause('   ') === true);
 }
 
 console.log(`\nbugRepro hermetic: ${pass} passed, ${fail} failed`);

@@ -1,0 +1,17 @@
+<!doctype html><html><head><meta charset="utf-8"><title>API Silent</title></head><body>
+<h1>Create Thing</h1>
+<input id="name" placeholder="Thing name">
+<button id="save">Save</button>
+<div id="out"></div>
+<script>
+// intercept fetch to a fake endpoint; the page renders NOTHING on success (UI-silent) — only the API confirms.
+var FAIL = location.search.includes('fail');
+window._origFetch = window.fetch;
+document.getElementById('save').addEventListener('click', async function(){
+  // real network call the observer can see
+  try {
+    await fetch('/api/thing?ts='+Date.now(), {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({name:document.getElementById('name').value})});
+  } catch(e){}
+  // NO success message rendered on purpose (UI-silent create)
+});
+</script></body></html>

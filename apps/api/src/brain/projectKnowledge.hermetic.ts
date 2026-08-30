@@ -59,5 +59,33 @@ const T = '2026-08-14T00:00:00Z';
   ok('surface sorted by confidence desc', hints.every((h, i) => i === 0 || hints[i - 1].confidence >= h.confidence));
 }
 
+// 6. ENVIRONMENT-STATE (perishable MEASUREMENT): production ALWAYS records the observed count (presence or absence),
+//    and recordObservation refreshes the fact text on the same key — so the fact SELF-HEALS to the latest count rather
+//    than needing a separate contradiction path (advisor: an env-state entry is a measurement, not a claim).
+{
+  const KEY = 'calendar-state:nzcurriculum:2026-08';
+  // run 1 sees the calendar EMPTY → record 0.
+  let e = recordObservation([], { kind: 'environment-state', key: KEY, fact: 'calendar window nzcurriculum:2026-08 had 0 event(s)' }, T);
+  ok('environment-state fact is recorded (absence)', e.length === 1 && e[0].kind === 'environment-state');
+  ok('environment-state IS surfaced (informs a future run)', surfaceHints(e).some((h) => h.kind === 'environment-state'));
+  ok('environment-state does NOT trip the oracle-verdict safety filter', !/held|broke|repro|verdict|oracle|bug|expected|defect/i.test(e[0].kind));
+
+  // run 2 sees 12 events → recording the SAME key OVERWRITES the fact text (self-heal), one entry, no stale "empty".
+  e = recordObservation(e, { kind: 'environment-state', key: KEY, fact: 'calendar window nzcurriculum:2026-08 had 12 event(s) — enough to attempt a drop-precision repro' }, T);
+  ok('re-observing the same window OVERWRITES to the new count (self-heals, no duplicate)', e.length === 1);
+  ok('the surfaced fact now reflects PRESENCE (12), not the stale absence', surfaceHints(e).some((h) => /12 event/.test(h.fact)));
+  ok('presence is reusable positive knowledge (not dropped)', surfaceHints(e).some((h) => h.kind === 'environment-state'));
+  ok('environment-state key is scoped to tenant+window (nzcurriculum ≠ demo)', !surfaceHints(e).some((h) => /demo/.test(h.fact)));
+}
+
+// 7. THE MANGLED-FACT emitter guard: a verb-clause step-fragment must NOT be recordable as a route label. (The class
+//    that produced `route:date to any date within the current cale`.) Assert the DISCRIMINATOR the emitter now uses.
+{
+  const { looksLikeClause } = require('./intentRunner');
+  ok('a mangled step-fragment is rejected as a route label', looksLikeClause('date to any date within the current cale') === true);
+  ok('a real control label ("My Calendar") is NOT rejected', looksLikeClause('My Calendar') === false);
+  ok('a real control label ("Demo School") is NOT rejected', looksLikeClause('Demo School') === false);
+}
+
 console.log(`\nprojectKnowledge hermetic: ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

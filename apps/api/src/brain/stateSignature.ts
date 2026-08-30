@@ -30,6 +30,10 @@ export interface PageShape {
   /** the SET of interactive affordance labels on the page, normalized + deduped + sorted. This is the load-bearing
    *  signal for SPA view-swaps: the same route with a different action-set is a different state. */
   affordances: string[];
+  /** THE HONEST DENOMINATOR: how many interactive elements were ACTUALLY PRESENT on the page (uncapped, pre-slice).
+   *  The map's `interactives` field is capped at MAX_ACTIONS=10 (a fiction — every page reads "10"); this is the real
+   *  count, so coverage = probed/present is measurable. Not part of the signature (a count would over-split states). */
+  affordancesPresent?: number;
   /** coarse landmark/structure counts — how many of each structural region. Distinguishes list-vs-form-vs-detail
    *  without being so fine that cosmetic churn splits a state. */
   landmarks: { forms: number; tables: number; lists: number; headings: number; nav: number };
@@ -56,15 +60,30 @@ export interface PageShape {
  */
 export function collapseDecision(
   shape: PageShape,
-  seen: Array<{ sig: string; contentVolume?: number }>,
+  seen: Array<{ sig: string; contentVolume?: number; routeKey?: string }>,
 ): { action: 'enter' | 'collapse'; reason: string; sig: string } {
   const sig = sigFromShape(shape);
   const degenerate = (shape.affordances?.length || 0) === 0 &&
     !((shape.landmarks?.forms || 0) + (shape.landmarks?.tables || 0) + (shape.landmarks?.lists || 0) + (shape.landmarks?.headings || 0) + (shape.landmarks?.nav || 0));
   if (degenerate) return { action: 'enter', reason: 'degenerate/unhydrated capture — never collapse an empty DOM', sig };
   const cv = shape.contentVolume ?? 0;
+  // AN EMPTY PAGE (contentVolume 0) IS NEVER A DUPLICATE: it carries no evidence of being a copy of anything, and
+  // two near-empty pages (a login screen at "/" and its "Setup new password" variant) must NOT collapse into each
+  // other. Real-world instance of the over-collapse trap the synthetic degenerate test missed. (PROVEN load-bearing:
+  // schooltalk has 2 genuine cv=0 sig-collisions of DIFFERENT routes — /Calendar vs /Progressions›My Calendar — that
+  // MUST stay distinct; weakening this rule re-merges them. The click-path explosion is fixed at the ENQUEUE seam
+  // instead — see enqueue-time same-route-same-view dedup in crawlMapService, not here.)
+  // cv=0 still force-ENTERS everywhere it used to (protects schooltalk's genuine cv=0 sig-collisions of DIFFERENT
+  // routes — /Calendar vs /Progressions›My Calendar — which have DIFFERENT routeKeys) — EXCEPT when the exact same
+  // state (same sig) at the exact same ROUTE was already mapped. That exception collapses the click-path/hash re-visit
+  // explosion (the fixture: reaching #settings via home→nav→settings vs directly — same routeKey + same sig) without
+  // touching the cross-route case. routeKey is inside sigFromShape, so same sig ⇒ same routeKey anyway; the explicit
+  // routeKey check is a belt-and-suspenders guard for the (rare) sig collision across routes.
+  const sameRouteSameState = seen.some((s) => s.sig === sig && s.routeKey === shape.routeKey);
+  if (cv === 0 && !sameRouteSameState) return { action: 'enter', reason: 'zero content — no evidence it duplicates anything', sig };
   const match = seen.find((s) => s.sig === sig);
   if (!match) return { action: 'enter', reason: 'new structure (unseen signature)', sig };
+  if (cv === 0) return { action: 'collapse', reason: 'same state (sig) at the same route, both empty — a re-visit, not a new page', sig };
   // same signature — collapse ONLY if content volume is also similar (a true duplicate). Materially different content
   // = same shell, different DATA (empty vs full) → ENTER, so we don't skip a data-bearing page.
   const seenCv = match.contentVolume ?? 0;
@@ -128,8 +147,21 @@ export async function captureShape(page: { evaluate: (fn: any) => Promise<any> }
     // silent degeneracy that made all states collapse. Everything here is inlined, no helper closures.
     const raw = await page.evaluate(() => {
       const d: any = (globalThis as any).document;
+      // SHADOW-AWARE (FINDING 1): count affordances inside open shadow roots too (web-component controls were invisible).
+      // Pure counting/signature — no false-pass risk. Fallback to light-DOM if the deep-query shim isn't present.
+      const Qd: any = (globalThis as any).__xsionQueryAllDeep;
+      const qd = (sel: string) => Qd ? Qd(sel, d) : Array.prototype.slice.call(d.querySelectorAll(sel));
       const interactiveSel = 'a[href], button, [role="button"], [role="link"], [role="menuitem"], [role="tab"], input, select, textarea';
-      const els: any[] = Array.prototype.slice.call(d.querySelectorAll(interactiveSel)).slice(0, 300);
+      const allEls: any[] = qd(interactiveSel);
+      // THE HONEST DENOMINATOR: count EVERY visible interactive element on the page (uncapped) — this is the real
+      // affordance count, vs the map's `interactives` which is capped at MAX_ACTIONS=10. No slice here.
+      let affordancesPresent = 0;
+      for (let i = 0; i < allEls.length; i++) {
+        const el = allEls[i];
+        const r = el.getBoundingClientRect ? el.getBoundingClientRect() : { width: 1, height: 1 };
+        if (r && (r.width > 0 || r.height > 0)) affordancesPresent++;
+      }
+      const els: any[] = allEls.slice(0, 300);   // the sig itself still uses a bounded label set (dedup+top-24)
       const affordances: string[] = [];
       for (let i = 0; i < els.length; i++) {
         const el = els[i];
@@ -153,6 +185,7 @@ export async function captureShape(page: { evaluate: (fn: any) => Promise<any> }
       const textLen = ((d.body && d.body.innerText) || '').length;
       return {
         affordances,
+        affordancesPresent,
         heading,
         landmarks: {
           forms: d.querySelectorAll('form').length,
@@ -164,7 +197,7 @@ export async function captureShape(page: { evaluate: (fn: any) => Promise<any> }
         contentVolume: rows + Math.floor(textLen / 500),   // rows dominate; text length is a coarse tiebreaker
       };
     });
-    return { routeKey, affordances: raw.affordances || [], heading: raw.heading || undefined, landmarks: raw.landmarks, contentVolume: raw.contentVolume };
+    return { routeKey, affordances: raw.affordances || [], affordancesPresent: raw.affordancesPresent, heading: raw.heading || undefined, landmarks: raw.landmarks, contentVolume: raw.contentVolume };
   } catch (e: any) {
     // capture failed (navigation mid-flight, detached frame, or an evaluate error). Degrade to a route-only shape,
     // but STAMP the error so a degenerate capture can never again masquerade as a real (all-collapsing) signature —

@@ -19,6 +19,7 @@ import { startApiTest } from './apiTestService';
 import { startSecurityAudit } from './securityAuditService';
 import { startEnvMatrix } from './envMatrixService';
 import { startSoaRun } from './soaRunService';
+import { observedChoices, chosenOption } from './reachState';   // deterministic tenant/scope extraction from the map
 
 export type MissionEvent =
   | { type: 'mission:phase'; phase: 'plan' | 'run' | 'done'; label: string }
@@ -45,6 +46,11 @@ export function startMission(projectId: string, baseUrl: string, opts: MissionOp
 
 async function runMission(runId: string, projectId: string, baseUrl: string, opts: MissionOpts) {
   const map = store.getProjectMap(projectId);
+  // DETERMINISTIC SCOPE (2026-08-23): if the mission names a multi-tenant target the map knows (a school/portal/
+  // workspace), extract it here and hand it to break-it's DETERMINISTIC tenant-reach (buildTenantReachPrefix) — NOT
+  // the SoA flow-planner reach step (which got "2/5 partial" on the user's mission). Reuses the same map-driven
+  // matcher as bug-repro/reach (observedChoices + chosenOption: "NZ Curriculum" beats "NZ"). Empty on single-tenant.
+  const missionScope = chosenOption(opts.mission, observedChoices(map)) || undefined;
   emit(runId, { type: 'mission:phase', phase: 'plan', label: 'Understanding the mission' });
   emit(runId, { type: 'mission:think', message: `Reading your mission and deciding which tests to run: “${opts.mission.slice(0, 120)}”` });
 
@@ -69,27 +75,43 @@ async function runMission(runId: string, projectId: string, baseUrl: string, opt
 
   emit(runId, { type: 'mission:phase', phase: 'run', label: 'Running the mission' });
   const results: any[] = [];
-  for (let i = 0; i < mission.steps.length; i++) {
-    const step = mission.steps[i];
-    const subRunId = launchEngine(projectId, baseUrl, step, opts.repo);
+  // if we have a deterministic scope AND a break-it/bug-repro step will reach it, a SoA 'flow' step whose only job is
+  // to "reach <scope>" is redundant + weaker — drop it so the mission uses the reliable deterministic reach instead.
+  const hasDrivingStep = mission.steps.some((s) => s.engine === 'break-it' || s.engine === 'bug-repro');
+  const plannedSteps = mission.steps.filter((s) => !(missionScope && hasDrivingStep && s.engine === 'flow'
+    && new RegExp(`reach|navigate|go to|${missionScope}`, 'i').test(`${stepLabel(s)} ${s.why || ''}`)));
+  if (plannedSteps.length < mission.steps.length) emit(runId, { type: 'mission:think', message: `Using the deterministic tenant-reach for "${missionScope}" (from the map) instead of a separate navigation step — more reliable than re-planning the route.` });
+
+  for (let i = 0; i < plannedSteps.length; i++) {
+    const step = plannedSteps[i];
+    const subRunId = launchEngine(projectId, baseUrl, step, opts.repo, missionScope);
     if (!subRunId) { emit(runId, { type: 'mission:think', message: `Skipped step ${i + 1} (${step.engine}) — missing what it needs.` }); results.push({ ...step, outcome: 'skipped' }); continue; }
     emit(runId, { type: 'mission:step-start', index: i, engine: step.engine, label: stepLabel(step), subRunId });
-    emit(runId, { type: 'mission:think', message: `Step ${i + 1}/${mission.steps.length}: ${stepLabel(step)} — ${step.why}` });
+    emit(runId, { type: 'mission:think', message: `Step ${i + 1}/${plannedSteps.length}: ${stepLabel(step)} — ${step.why}` });
     const outcome = await waitForSubRun(subRunId);
     emit(runId, { type: 'mission:step-done', index: i, engine: step.engine, outcome: outcome.summary, subRunId });
     results.push({ ...step, subRunId, outcome: outcome.summary, findings: outcome.findings });
   }
 
-  const report = { summary: mission.summary, mission: opts.mission, steps: results };
+  // ACTIONS ROLLUP (the entrepreneur-lens loop AT MISSION LEVEL): a mission must not end as a summary dead-end —
+  // it surfaces WHAT THE USER DOES NEXT by aggregating the actionable resolutions from every sub-run's findings
+  // (break-it findings + the bug-repro artifact both carry `resolution`). So "3 needs-review" becomes "3 things
+  // to do: file 1 ticket, answer 2 questions". Pure rollup — reads what the engines recorded, invents nothing.
+  const actions = rollupActions(results);
+  const report = { summary: mission.summary, mission: opts.mission, steps: results, actions };
   store.updateTestRun(runId, { status: 'passed', finishedAt: new Date().toISOString(), artifacts: [{ kind: 'mission', ...report } as any] } as any);
+  if (actions.length) emit(runId, { type: 'mission:think', message: `Next actions: ${actions.map((a: any) => a.label).join(' · ')}` });
   emit(runId, { type: 'mission:phase', phase: 'done', label: 'Mission complete' });
   emit(runId, { type: 'mission:done', report });
   emit(runId, { type: 'mission:think', message: `Mission done — ${results.length} step${results.length > 1 ? 's' : ''} run. ${summarize(results)}` });
 }
 
-function launchEngine(projectId: string, baseUrl: string, step: MissionStep, repo: string): string | null {
+function launchEngine(projectId: string, baseUrl: string, step: MissionStep, repo: string, scope?: string): string | null {
   switch (step.engine) {
-    case 'break-it': return step.feature ? startBreakIt(projectId, baseUrl, { repo, feature: step.feature }) : null;
+    // pass the deterministic scope → break-it enters the right tenant via buildTenantReachPrefix (no weak SoA reach).
+    // quick:true — a mission is a "does this work + what happens" request, so run happy/CRUD only (a few min), NOT a
+    // ~40min adversarial sweep. (A user wanting a full break-it uses the dedicated Break-it test, not a mission.)
+    case 'break-it': return step.feature ? startBreakIt(projectId, baseUrl, { repo, feature: step.feature, scope, quick: true }) : null;
     case 'bug-repro': return step.ticket ? startBugRepro(projectId, baseUrl, { repo, ticket: step.ticket }) : null;
     case 'api': return startApiTest(projectId, baseUrl, {});
     case 'audit': return startSecurityAudit(projectId, baseUrl, { repo, tier: 1 });
@@ -100,10 +122,17 @@ function launchEngine(projectId: string, baseUrl: string, step: MissionStep, rep
 }
 
 /** Poll the sub-run's recorded TestRun until it finishes, then summarize its outcome from what it recorded. */
-async function waitForSubRun(subRunId: string, timeoutMs = 240_000): Promise<{ summary: string; findings: any }> {
+// 240s was too short: a real break-it run (20 attacks × live navigation) legitimately takes 5-8 min, so the mission
+// reported its own sub-run as "timed out" and rolled up ZERO actions even though the sub-run later finished fine.
+// 600s covers a full break-it/bug-repro; the poll still returns the instant the sub-run flips to passed/failed.
+async function waitForSubRun(subRunId: string, timeoutMs = 2_700_000): Promise<{ summary: string; findings: any }> {
   const t0 = Date.now();
-  // small helper: sleep via a real timer (no busy loop)
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const partial = () => {   // read whatever the sub-run has PERSISTED so far (break-it persists findings incrementally)
+    const run = store.getTestRun(subRunId) as any;
+    const art = (run?.artifacts || [])[0] || {};
+    return { run, art, findings: art.findings || art.results || null };
+  };
   while (Date.now() - t0 < timeoutMs) {
     const run = store.getTestRun(subRunId) as any;
     if (run && (run.status === 'passed' || run.status === 'failed') && run.finishedAt) {
@@ -112,7 +141,33 @@ async function waitForSubRun(subRunId: string, timeoutMs = 240_000): Promise<{ s
     }
     await sleep(3000);
   }
-  return { summary: 'timed out', findings: null };
+  // TIMEOUT (2026-08-23 fix): the OLD code returned {summary:'timed out', findings:null} — discarding the findings
+  // the sub-run HAD persisted (break-it writes them incrementally), so the mission reported "no report, no nothing"
+  // even though real results existed. Raised the wait to 45min (a full break-it can take ~40) AND, on expiry, return
+  // the PARTIAL persisted findings so the mission's rollup shows what actually happened instead of an empty timeout.
+  const p = partial();
+  const n = Array.isArray(p.findings) ? p.findings.length : 0;
+  return n > 0
+    ? { summary: `still running after ${Math.round(timeoutMs / 60000)}min — reporting ${n} finding(s) recorded so far (sub-run ${subRunId.slice(0, 8)})`, findings: p.findings }
+    : { summary: 'timed out — no findings recorded yet', findings: null };
+}
+
+/** Aggregate the actionable resolutions from every sub-run's findings into mission-level NEXT ACTIONS. Reads the
+ *  `resolution` each engine attached (break-it findings; the bug-repro artifact) and counts them by kind, so the
+ *  mission view shows "file 2 tickets · answer 1 question · add credentials" instead of a dead-end summary. Pure. */
+export function rollupActions(steps: any[]): Array<{ kind: string; count: number; label: string }> {
+  const counts: Record<string, number> = {};
+  const bump = (k?: string) => { if (k && k !== 'none') counts[k] = (counts[k] || 0) + 1; };
+  for (const s of (steps || [])) {
+    const f = s?.findings;
+    if (Array.isArray(f)) { for (const finding of f) bump(finding?.resolution?.kind); }        // break-it: array of findings
+    else if (f && typeof f === 'object') bump(f?.resolution?.kind);                             // bug-repro: the artifact
+  }
+  const LABEL: Record<string, string> = {
+    'file-ticket': 'file ticket', 'answer-oracle': 'answer a bug question', 'needs-input': 'tell it which control',
+    'credentials': 'add credentials', 'authorize': 'authorize the target', 'unreachable': 'reachability blocked',
+  };
+  return Object.entries(counts).map(([kind, count]) => ({ kind, count, label: `${count}× ${LABEL[kind] || kind}` }));
 }
 
 function summarizeArtifact(run: any, art: any): string {
@@ -125,6 +180,9 @@ function summarizeArtifact(run: any, art: any): string {
   if (art.kind === 'bug-repro') return art.verdict || 'done';
   if (art.kind === 'security-audit') { const v = (art.findings || []).filter((f: any) => f.verdict === 'vulnerable').length; return v ? `${v} vulnerable` : 'clean'; }
   if (art.kind === 'env-matrix') { const f = (art.results || []).filter((r: any) => r.status === 'fail').length; return f ? `${f} conditions failed` : 'all conditions passed'; }
+  // api: report the per-probe tally (findings, NOT the run status) so the mission summary matches the runs-list
+  // "N pass · N fail" — a fail is a finding, not a failed run (mirrors the status=executed reframe in apiTestService).
+  if (art.kind === 'api') { const f = (art.results || []).filter((r: any) => r.status === 'fail').length; const p = (art.results || []).filter((r: any) => r.status === 'pass').length; return f ? `${f} of ${p + f} endpoints flagged` : `${p} endpoints OK`; }
   return run.summary || 'done';
 }
 

@@ -86,6 +86,24 @@ const dash = (cv: number): PageShape => ({
   ok('degenerate capture NEVER collapses (empty-DOM over-collapse guard)', collapseDecision(empty, [{ sig: emptySig, contentVolume: 0 }]).action === 'enter');
   // 5. first sight of any shape (nothing seen) → ENTER
   ok('unseen signature → enter', collapseDecision(dash(1), []).action === 'enter');
+  // 6. REAL-WORLD trap (the schooltalk login collapse): a page with contentVolume 0 but 1+ affordance is NOT fully
+  //    degenerate, yet MUST NOT collapse — "/" (login) collapsed into "/ Setup new password" and killed the crawl.
+  const loginish: PageShape = { routeKey: 'https://x.io/', affordances: ['Setup new password'], landmarks: { forms: 0, tables: 0, lists: 0, headings: 1, nav: 0 }, contentVolume: 0 };
+  const loginishSig = sigFromShape(loginish);
+  ok('zero-content page NEVER collapses (even with 1 affordance)', collapseDecision(loginish, [{ sig: loginishSig, contentVolume: 0 }]).action === 'enter');
+
+  // 7. THE CALENDAR-WEEK TRAP (documents why a naive contentVolume selector-fix must NOT ship alone): two calendars
+  //    at the SAME routeKey template (same slug, different ?date=) have identical structure. TODAY both have cv=0 →
+  //    the `cv===0 → enter` guard keeps them BOTH explorable (different weeks = different events). But if a future
+  //    contentVolume change makes an EMPTY week score a NON-zero grid-cell count (e.g. 14 day-cells), two empty
+  //    weeks become "same sig + similar content" → COLLAPSE, and the crawler stops exploring OTHER weeks of the same
+  //    calendar — exactly where 10-Sep/Oct/Dec events live. This test PINS the trap: with equal NON-zero cv, same
+  //    sig, collapseDecision returns 'collapse'. So a contentVolume selector-fix MUST arrive WITH sibling-relative
+  //    richness (only ENTER a week that is an OUTLIER vs its sibling weeks), never as a bare count. See advisor.
+  const cal = (cv: number): PageShape => ({ routeKey: 'https://x.io/:slug/Teacher/Calendar', affordances: ['Create Event', 'Select week'], landmarks: { forms: 0, tables: 0, lists: 0, headings: 1, nav: 1 }, contentVolume: cv });
+  const calSig = sigFromShape(cal(14));
+  ok('TRAP: two same-template calendar weeks with equal NON-zero cv → COLLAPSE (why a bare cv-fix is unsafe)', collapseDecision(cal(14), [{ sig: calSig, contentVolume: 14 }]).action === 'collapse');
+  ok('...but a week with OUTLIER content (events!) vs empty siblings → ENTER (the fix a sibling-relative metric must give)', collapseDecision(cal(40), [{ sig: calSig, contentVolume: 14 }]).action === 'enter');
 }
 
 console.log(`\n${pass}/${pass + fail} passed`);

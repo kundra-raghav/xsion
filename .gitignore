@@ -1,0 +1,21 @@
+.DS_Store
+.claude
+.history
+*.log
+node_modules
+dist
+build
+.env
+.env.*
+!.env.example
+coverage
+*.tmp
+*.swp
+
+# scratch/debug test scripts and generated crawl maps (session artifacts)
+apps/api/_*.mjs
+apps/api/_*.ts
+apps/api/rnd_*.json
+apps/api/*_map.json
+apps/api/db.json
+apps/api/crawlstat.mjs

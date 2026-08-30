@@ -1,8 +1,28 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { clsx } from 'clsx';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useTestRun } from '../useTestRun';
+import { TestBrowserStage } from '../TestBrowserStage';
 import { Label, PrimaryBtn } from '../kit';
+
+/** LIVE WINDOW for a mission SUB-RUN (2026-08-23): each mission step launches a sub-run (its own runId) whose engine
+ *  streams test:frame (screenshot+url+action) to THAT channel. The mission screen subscribes to the MISSION runId, so
+ *  those frames were never shown. This watches the running step's subRunId and mounts the SAME live browser stage the
+ *  direct break-it/bug-repro views use — so you watch Xsion drive the page live, inline, per step. (Replay of a
+ *  finished sub-run already works via RunsScreen/RunPlayer + the persisted frames.) */
+function MissionLiveStage({ subRunId }: { subRunId: string }) {
+  const { state, watch } = useTestRun();
+  useEffect(() => { watch(subRunId); return () => watch(null); }, [subRunId, watch]);
+  if (!state.live?.screenshot) {
+    return <div className="mono mt-2 rounded-[6px] border border-line bg-black/20 px-3 py-6 text-center text-[10px] text-muted-2">connecting to the live browser…</div>;
+  }
+  return (
+    <div className="mt-2 overflow-hidden rounded-[6px] border border-accent-line">
+      {state.live?.label && <div className="flex items-center justify-between bg-accent-soft/40 px-2 py-1"><span className="mono text-[10px] text-accent">{state.live.label}</span>{state.live?.path && <span className="mono text-[10px] text-muted-2">{state.live.path}</span>}</div>}
+      <TestBrowserStage state={state} running={true} />
+    </div>
+  );
+}
 
 const ENGINE_ICON: Record<string, string> = { 'break-it': 'ADVERSARIAL', 'bug-repro': 'REPLICATE', api: 'API', audit: 'SECURITY', 'env-matrix': 'CONDITIONS', flow: 'FLOW' };
 const outcomeTone = (o?: string) => !o ? 'text-muted-2' : /broke|vulnerable|fail|reproduced/.test(o) ? 'text-realbug' : /held|clean|passed|not-reproduced|all conditions/.test(o) ? 'text-expected' : /can.?t|review|timed/.test(o) ? 'text-amber' : 'text-muted';
@@ -70,6 +90,7 @@ export function MissionView({ projectId, repo, onBack }: { projectId: string; re
                     {s.status === 'running' && <span className="mono text-[10px] text-accent">running…</span>}
                   </div>
                   {s.why && <div className="mono mt-1.5 pl-[26px] text-[10px] leading-[1.5] text-muted-2 text-pretty">{s.why}</div>}
+                  {s.status === 'running' && s.subRunId && <div className="pl-[26px]"><MissionLiveStage subRunId={s.subRunId} /></div>}
                 </motion.div>
               ))}
             </AnimatePresence>

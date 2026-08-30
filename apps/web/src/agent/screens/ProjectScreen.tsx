@@ -124,15 +124,33 @@ function RolesPanel({ project, map }: { project: Project; map: any }) {
   const [roles, setRoles] = useState<any[]>([]);
   const [coverage, setCoverage] = useState<any>(null);
   const [name, setName] = useState(''); const [email, setEmail] = useState(''); const [pw, setPw] = useState('');
+  const [hasProjectCreds, setHasProjectCreds] = useState<boolean>(false);
+  const [pEmail, setPEmail] = useState(''); const [pPw, setPPw] = useState(''); const [savingCreds, setSavingCreds] = useState(false);
   const load = () => {
     fetch(`${API}/api/projects/${project.id}/roles`).then((r) => r.json()).then((d) => setRoles(d.roles || [])).catch(() => {});
     fetch(`${API}/api/projects/${project.id}/coverage`).then((r) => (r.ok ? r.json() : null)).then(setCoverage).catch(() => setCoverage(null));
+    fetch(`${API}/api/projects/${project.id}/has-credentials`).then((r) => r.json()).then((d) => setHasProjectCreds(!!d.hasCredentials)).catch(() => {});
   };
   useEffect(load, [project]);
   const addRole = async () => {
     if (!name.trim()) return;
     await fetch(`${API}/api/projects/${project.id}/roles`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, email, password: pw }) });
     setName(''); setEmail(''); setPw(''); load();
+  };
+  // SET THE PROJECT CREDENTIALS the ENGINES use (break-it / bug-repro / env-matrix read the project default, not a
+  // role). This is the "save creds so they actually get used" control the user needs.
+  const saveProjectCreds = async () => {
+    if (!pEmail.trim() || !pPw) return;
+    setSavingCreds(true);
+    try {
+      const r = await fetch(`${API}/api/projects/${project.id}/credentials`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: pEmail, password: pPw }) });
+      const d = await r.json();
+      setHasProjectCreds(!!d.hasCredentials); setPEmail(''); setPPw('');
+    } finally { setSavingCreds(false); }
+  };
+  const clearProjectCreds = async () => {
+    await fetch(`${API}/api/projects/${project.id}/credentials`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+    setHasProjectCreds(false);
   };
   const crawlAs = async (roleId: string) => {
     await fetch(`${API}/api/projects/${project.id}/crawl-map`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ roleId }) });
@@ -141,8 +159,26 @@ function RolesPanel({ project, map }: { project: Project; map: any }) {
 
   return (
     <div className="max-w-[720px]">
+      {/* PROJECT CREDENTIALS — the ones the ENGINES (break-it / bug-repro / env-matrix) actually sign in with. */}
+      <div className="mb-6 rounded-[7px] border border-line bg-surface p-4">
+        <div className="mb-1 flex items-center gap-2.5">
+          <span className="text-[13.5px] font-medium">Project sign-in credentials</span>
+          <span className={clsx('mono rounded-[3px] px-1.5 py-0.5 text-[9px]', hasProjectCreds ? 'bg-accent-soft text-accent' : 'bg-[oklch(1_0_0_/_0.06)] text-muted-2')}>{hasProjectCreds ? 'set · engines will sign in' : 'not set · engines can’t reach the app'}</span>
+        </div>
+        <p className="mono mb-3 text-[10.5px] leading-[1.7] text-muted-2 text-pretty">These are what Break-it, Replicate-a-bug, and the Environment matrix use to log in before testing. Without them, those features stop at the sign-in screen. Held in memory only, never written to disk, never echoed back.</p>
+        {hasProjectCreds ? (
+          <button onClick={clearProjectCreds} className="mono rounded-[5px] border border-line-strong px-3 py-1.5 text-[11px] hover:border-realbug hover:text-realbug">clear credentials</button>
+        ) : (
+          <div className="flex flex-wrap items-end gap-2">
+            <Field label="email / username" value={pEmail} onChange={setPEmail} placeholder="admin@thedent.in" />
+            <Field label="password" value={pPw} onChange={setPPw} placeholder="••••••" type="password" />
+            <button onClick={saveProjectCreds} disabled={savingCreds || !pEmail.trim() || !pPw} className={clsx('mono rounded-[5px] px-3 py-1.5 text-[11px] font-medium', (savingCreds || !pEmail.trim() || !pPw) ? 'bg-[oklch(1_0_0_/_0.06)] text-muted-2' : 'bg-accent text-[oklch(0.2_0.02_264)]')}>{savingCreds ? 'saving…' : 'save credentials'}</button>
+          </div>
+        )}
+      </div>
+
       <div className="mb-2 text-[13.5px] font-medium">Roles</div>
-      <p className="mono mb-4 text-[10.5px] leading-[1.7] text-muted-2 text-pretty">One URL, many roles. Give each role a credential set; Xsion crawls once per role and tags every page, flow, and API with the roles that actually saw it — so “nothing is left” becomes checkable per role. Credentials are held in memory only, never written to disk.</p>
+      <p className="mono mb-4 text-[10.5px] leading-[1.7] text-muted-2 text-pretty">One URL, many roles. Give each role a credential set; Xsion crawls once per role and tags every page, flow, and API with the roles that actually saw it — so “nothing is left” becomes checkable per role. Adding a role with credentials also sets them as the project sign-in credentials if none are set yet. Held in memory only, never written to disk.</p>
 
       <div className="mb-5 flex flex-col gap-1.5">
         {roles.map((r) => {

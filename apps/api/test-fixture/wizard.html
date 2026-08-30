@@ -1,0 +1,45 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Wizard Fixture</title>
+<style>body{font-family:sans-serif;padding:20px}[role=tab]{padding:8px 16px;border:1px solid #ccc;background:#eee;cursor:pointer}[role=tab][aria-selected=true]{background:#2e5c80;color:#fff}.panel{display:none;margin-top:20px}.panel.active{display:block}button.act{margin-top:16px;padding:10px 20px}</style>
+</head><body>
+<h1>Create Event</h1>
+<div role="tablist">
+  <button role="tab" aria-selected="true" data-i="0">Set Learning &amp; Schedule</button>
+  <button role="tab" aria-selected="false" data-i="1">Select Teachers</button>
+  <button role="tab" aria-selected="false" data-i="2">Planning</button>
+</div>
+
+<div class="panel active" data-i="0">
+  <!-- schooltalk uses PLACEHOLDER-based fields (no <label for>), so the fixture matches that real pattern -->
+  <input id="title" type="text" placeholder="Enter event title"><br><br>
+  <input id="time" type="text" placeholder="hh:mm (a|p)m">
+  <!-- schooltalk-style: this ADVANCES despite containing "Save" -->
+  <button class="act adv">Save time slot</button>
+</div>
+<div class="panel" data-i="1">
+  <input id="teacher" type="text" placeholder="Search teacher name">
+  <button class="act adv">Next</button>
+</div>
+<div class="panel" data-i="2">
+  <input id="notes" type="text" placeholder="Notes">
+  <!-- terminal -->
+  <button class="act create" id="createBtn">Create Event</button>
+</div>
+
+<div id="result" style="margin-top:24px;font-weight:bold;color:green"></div>
+
+<script>
+var cur = 0;
+function show(i){
+  cur = i;
+  document.querySelectorAll('[role=tab]').forEach(function(t){ t.setAttribute('aria-selected', (+t.dataset.i===i)?'true':'false'); });
+  document.querySelectorAll('.panel').forEach(function(p){ p.classList.toggle('active', +p.dataset.i===i); });
+}
+document.querySelectorAll('[role=tab]').forEach(function(t){ t.addEventListener('click', function(){ show(+t.dataset.i); }); });
+document.querySelectorAll('.adv').forEach(function(b){ b.addEventListener('click', function(){ if(cur<2) show(cur+1); }); });
+document.getElementById('createBtn').addEventListener('click', function(){
+  var title=document.getElementById('title').value;
+  document.getElementById('result').textContent = 'EVENT CREATED: '+ (title||'(no title)');
+});
+</script>
+</body></html>

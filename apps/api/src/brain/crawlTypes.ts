@@ -40,9 +40,20 @@ export interface MappedPage {
   title?: string;
   screenshotKey?: string;
   fingerprint?: string;
-  interactives: number;   // count of buttons/links/inputs found
+  interactives: number;   // count of ACTIONS the crawler captured for testing (capped at MAX_ACTIONS — NOT the real total)
+  affordancesPresent?: number;   // THE HONEST DENOMINATOR: total visible interactive elements actually on the page (uncapped). coverage = interactives/affordancesPresent.
   requirements?: FieldRequirement[];  // typed field requirements found on this page (item 3)
   roles?: string[];       // role ids that reached this page (item 4). Absent/empty = the default single crawl.
+  sig?: string;           // structural signature (stateSignature) — makes duplicate-collapse checkable from the MAP
+  contentVolume?: number; // coarse data-row count — separates an empty shell from a data-bearing variant
+  collapsedVariants?: string[];   // other URLs that collapsed to THIS page (structural dupes recorded, not deep-crawled)
+  // FULL affordance inventory: EVERY control the crawler saw on this page, whether or not it clicked it. kind: 'nav'
+  // (followed) / 'action' (a capability like "Create Event" — recorded, not auto-clicked, for the test engine) /
+  // 'guarded' (Delete/Send/Pay — mapped-but-never-clicked). Nothing seen is silently dropped.
+  affordanceInventory?: Array<{ label: string; kind: 'nav' | 'action' | 'guarded'; selName?: string; tier?: string;
+    // OPEN-TO-LEARN-THE-FORM (consented): the fields of the form this action-control opens (e.g. Create Event →
+    // title/date/teacher/group). Harvested by opening it once read-only; a testing engine scaffolds attacks from these.
+    revealedRequirements?: Array<{ label: string; kind: string; required: boolean; placeholder?: string }> }>;
 }
 
 export interface ApiEndpoint {
@@ -58,6 +69,12 @@ export interface ApiEndpoint {
   gqlKind?: 'query' | 'mutation' | 'subscription';
   gqlOperation?: string;  // the operation name, derived from the payload
   roles?: string[];       // role ids that fired this endpoint (item 4)
+  // ── PASSIVE API-OBSERVATION GROWTH (2026-08-23): learn MORE from traffic we already capture, no synthetic firing. ──
+  firedBy?: string[];     // UI action label(s) that triggered this call ("Create Event") → action→API edges + oracle
+  writes?: boolean;       // a mutating call (POST/PUT/PATCH/DELETE, or a GraphQL mutation) → an app CAPABILITY
+  entity?: string;        // the resource this endpoint acts on, derived from the url path (e.g. "event", "group")
+  reqFields?: string[];   // request payload KEY names (shapes only, never values) → real required-field knowledge
+  respFields?: string[];  // response payload KEY names (shapes only) → the entity's observed shape
 }
 
 /** Parse a GraphQL request body → {kind, operation}. A /graphql endpoint is ONE url, so the operation name
@@ -102,6 +119,29 @@ export interface MappedFlow {
   roles?: string[];             // role ids whose crawl surfaced this flow (item 4 — verified, unlike `role`)
 }
 
+/** THE INTERACTION-GRAPH EDGE (the "tree of elements + relations" made durable): performing `action` while in the
+ *  state identified by `fromSig` transitioned the app to the state `toSig`. Keyed on the ABSTRACTED state signatures
+ *  (not raw URLs) — so this is a STATE-FLOW GRAPH (Crawljax SFG), not a sitemap: two different data-pages with the
+ *  same structure share a state, and clicking a tab that swaps an in-place view IS an edge even with no URL change.
+ *  This is computed every crawl (parentSig → currentSig via the click that produced the nav) and was previously
+ *  DISCARDED; persisting it is what lets a consumer answer "what does clicking X do / what connects to what." */
+export interface GraphEdge {
+  fromSig: string;                 // abstracted signature of the source state (empty/undefined for the crawl's root)
+  toSig: string;                   // abstracted signature of the state reached
+  // the action fired (last step of the nav's click-path, or a bare navigate). L1-a: a click/fill action carries a
+  // RESOLVABLE element identity `elementId` so "which control does this / how do I re-find it" is answerable. Shape:
+  // {tier, css?, role?, name?} — a real CSS selector (id/testid/aria/positional) OR a getByText/getByRole recipe
+  // (text tier). A consumer resolves: css ? locator(css) : role ? getByRole(role,{name}) : getByText(name,{exact}).
+  // MEASURED: real apps' nav/tab/card controls are non-semantic (<span>/<a> no id/aria) → text tier dominates & MUST
+  // resolve (getByText resolved exactly-1 where getByRole gave 0). The identity is in the PAYLOAD always; the tier
+  // enters the dedup KEY per edgeKey's rule.
+  action: { kind: 'navigate' | 'click' | 'fill'; label: string; elementId?: { tier: import('./elementSelector').SelectorTier; css?: string | null; name?: string | null; verifiedAtCapture?: boolean; ambiguityCount?: number } };
+  toPath: string;                  // human-readable path of the destination (safePath + click-path) — for display
+  toIsNew: boolean;                // did this action reach a NOT-yet-seen state? (novelty — the discovery signal)
+  toCollapsed?: boolean;           // the destination collapsed onto an already-mapped state (a back-edge/loop)
+  count?: number;                  // how many times this exact edge was observed (deduped by from+action+to)
+}
+
 export interface ProjectMap {
   baseUrl: string;
   mode: 'code' | 'blackbox';
@@ -109,6 +149,8 @@ export interface ProjectMap {
   pages: MappedPage[];
   flows: MappedFlow[];
   api: ApiEndpoint[];
+  // THE INTERACTION GRAPH (element X in state A → state B). Persisted state-flow graph; see GraphEdge.
+  edges?: GraphEdge[];
   crawledAt: string;
   bounded: { maxPages: number; maxActionsPerPage: number; reachedLimit: boolean };
   status?: 'crawling' | 'done';
@@ -124,6 +166,20 @@ export interface ProjectMap {
   routeManifest?: { path: string; requiresAuth: boolean; role: string }[];
   // MULTI-ROLE (item 4): the roles crawled into this map. Every page/flow/api carries the role ids that saw it.
   roles?: RoleDef[];
+  // GATES (the crawler's missing primitive): a page that BLOCKS progress until you pick one of N options (a
+  // portal/workspace/tenant/school picker, a consent wall). Not a page — a decision point whose CHOICE determines
+  // what you see. Recorded so bug-repro/SoA don't rediscover the picker every run + know a named option exists.
+  gates?: GateInfo[];
+}
+
+/** A gate the crawl found: a hub where nearly every action leads to a distinct new state (a picker/menu). */
+export interface GateInfo {
+  path: string;                 // where the gate lives (route template)
+  kind: 'portal' | 'workspace' | 'tenant' | 'menu' | 'consent' | 'gate';   // best-guess label (from option text)
+  // the enumerated choices + where each led (if crawled). elementId = the RESOLVABLE identity of the option control
+  // (shared deriver+verifier), so a gate-seeded edge carries identity like any click edge.
+  options: Array<{ label: string; leadsTo?: string; elementId?: { tier: import('./elementSelector').SelectorTier; css?: string | null; name?: string | null; verifiedAtCapture?: boolean; ambiguityCount?: number } }>;
+  reason: string;               // why the crawl called it a gate (evidence, one line)
 }
 
 // ── The live crawl event stream (the agentic-browser view subscribes) ──

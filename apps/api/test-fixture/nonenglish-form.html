@@ -1,0 +1,12 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Formulario</title></head><body>
+<h1>Crear Evento</h1>
+<input id="nombre" placeholder="Nombre del evento">
+<div style="margin-top:40px">
+  <button id="cancel">Cancelar</button>
+  <button id="save">Guardar</button>   <!-- primary: last-in-DOM, bottom row, non-English -->
+</div>
+<div id="out"></div>
+<script>
+document.getElementById('save').addEventListener('click',()=>document.getElementById('out').textContent='GUARDADO');
+document.getElementById('cancel').addEventListener('click',()=>document.getElementById('out').textContent='CANCELADO');
+</script></body></html>
