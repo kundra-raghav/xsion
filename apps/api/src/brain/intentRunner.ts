@@ -171,6 +171,10 @@ export interface ExecResult {
   // did the capture-probe's opener click PERSIST a write? true ⇒ a DIRECT row-action (mutates on click, no modal) ⇒
   // the feature has no form to attack, so break-it clears the scraped crawl fields (Approve/Allocate ground-truth fix).
   liveOpenerPersisted?: boolean;
+  // Short-lived toast/alert text captured DURING the click window (before auto-dismiss). Carries the failure signal
+  // ("Something went wrong (500)") that finalText — read seconds later after a reload — misses, so the applied-despite-
+  // failure oracle can see a failure signal + a persisted write in the same window.
+  transientAlerts?: string[];
 }
 
 /** Capture an APP-AGNOSTIC state snapshot. Pure observation — mechanical facts only. */
@@ -1520,6 +1524,7 @@ export async function executeFlow(flow: IntentFlow, baseUrl: string, hooks: Exec
   // STATE-DELTA ORACLE scratch: before/after snapshots around the mutating submit (function-scoped so the delta build
   // after the try/catch can read them). Filled in the submit branch.
   let stateBefore: StateProbe | undefined, stateAfter: StateProbe | undefined;
+  const transientAlerts: string[] = [];   // short-lived toast/alert text captured in the click window (before auto-dismiss)
   // AI-EXECUTOR ESCALATION per-run cap (hang guard): the vision AI is called at most this many times per flow when the
   // deterministic resolvers fail to drive — bounded so a run can never stack model calls into a 17-min hang.
   let aiEscalationsLeft = Number(process.env.XSION_AI_ESCALATE_CAP || 2);
@@ -1957,6 +1962,25 @@ export async function executeFlow(flow: IntentFlow, baseUrl: string, hooks: Exec
         if (isAttackClick && attempt.matched > 0) {
           // the app's api() has 400–1400ms latency before persist() — wait for the write to land before snapshotting.
           await page.waitForTimeout(1600);
+          // CAPTURE THE TRANSIENT FAILURE SIGNAL HERE (2026-08-30): a failure toast ("Something went wrong (500)") is
+          // shown at the api() response (~400–1400ms) and AUTO-DISMISSES (torture: 2600ms). finalText — read seconds
+          // later after a reload — misses it entirely, so an APPLIED-DESPITE-FAILURE (500 + persisted write) read as a
+          // clean 'held'. This 1600ms window is exactly when the toast is on screen. Scan short-lived status text
+          // app-agnostically (ARIA roles for real apps + common toast/snackbar class shapes for the rest).
+          try {
+            const alerts = await page.evaluate(() => {
+              const d: any = (globalThis as any).document;
+              const sel = '[role="alert"], [role="status"], [aria-live], [class*="toast" i], [class*="snackbar" i], [class*="notification" i], [class*="flash" i]';
+              const out: string[] = [];
+              for (const el of Array.prototype.slice.call(d.querySelectorAll(sel))) {
+                if (!(el.offsetWidth || el.offsetHeight)) continue;
+                const t = (el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 120);
+                if (t && !out.includes(t)) out.push(t);
+              }
+              return out.slice(0, 6);
+            }).catch(() => [] as string[]);
+            for (const a of alerts) if (!transientAlerts.includes(a)) transientAlerts.push(a);
+          } catch {}
           try { stateAfter = await stateProbe(page); } catch {}
         }
         // NAV-COMPLETION WAIT: if this looked like a navigation intent OR the url changed, let the route settle.
@@ -2207,7 +2231,7 @@ export async function executeFlow(flow: IntentFlow, baseUrl: string, hooks: Exec
   }
 
   await browser.close().catch(() => {});
-  return { flowName: flow.name, status: failed ? 'failed' : 'passed', baseUrl, stepResults, consoleErrors, observedCalls, finalText, finalUrl, stateDelta, liveFields, liveActions, liveScope, liveCohort, liveModalActions, liveOpenerPersisted };
+  return { flowName: flow.name, status: failed ? 'failed' : 'passed', baseUrl, stepResults, consoleErrors, observedCalls, finalText, finalUrl, stateDelta, liveFields, liveActions, liveScope, liveCohort, liveModalActions, liveOpenerPersisted, transientAlerts };
 }
 
 // ── THE GENERAL GOAL-DRIVEN AGENT (2026-08-23) ─────────────────────────────────────────────────────────────────

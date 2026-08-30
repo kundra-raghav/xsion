@@ -788,6 +788,7 @@ export async function runStep(runId: string, baseUrl: string, step: BreakStep, m
 
   let consoleErrors: string[] = [];
   let observed = '';
+  let transientAlerts = '';   // toast/alert text captured in the click window (the failure signal finalText misses)
   let finalText = '';
   let observedCalls: import('./intentRunner').ObservedCall[] = [];   // API calls fired during the attack (post-submit oracle)
   let stateDelta: import('./intentRunner').StateDelta | undefined;   // STATE-DELTA ORACLE: observed effect of the mutating action (+ reload-persistence)
@@ -863,6 +864,9 @@ export async function runStep(runId: string, baseUrl: string, step: BreakStep, m
     }
     observed = sr.map((s) => `${s.status}:${s.note || s.attempts?.[0]?.error || ''}`).join(' | ').slice(0, 300);
     finalText = exec.finalText || '';
+    // transient toast/alert text captured DURING the click window (before auto-dismiss) — carries the failure signal
+    // ("(500)") that finalText misses because it's read after a reload. Prepended to the failure-signal text below.
+    transientAlerts = ((exec as any).transientAlerts || []).join(' | ');
     observedCalls = exec.observedCalls || [];
     stateDelta = exec.stateDelta;
     if (exec.liveFields) (opts as any)._liveFieldsSeen = exec.liveFields;   // UNION — DISCOVERY only (does a field exist anywhere)
@@ -1005,7 +1009,7 @@ export async function runStep(runId: string, baseUrl: string, step: BreakStep, m
     // that PERSISTED across a reload = the create/update really happened (held/passed, earned by inspection, no toast
     // needed). A change that REVERTED = optimistic/apply-then-fail (torture's 500-that-still-applied) → still uncertain.
     // NO change at all after a valid create = the write was silently dropped → a real, honest problem to surface.
-    if (stateDelta?.persisted && drovePass.clicked && brokeOnApplyDespiteFailure(`${finalText} ${observed}`, has5xx || hasStack, true)) {
+    if (stateDelta?.persisted && drovePass.clicked && brokeOnApplyDespiteFailure(`${transientAlerts} ${finalText} ${observed}`, has5xx || hasStack, true)) {
       return { ...base, verdict: 'broke', cause: 'file-ticket', detail: `APPLIED DESPITE FAILURE — the ${step.phase} action reported FAILURE (failure toast / 5xx) but the write PERSISTED across a reload. The app lied about failing and committed the change anyway — a real defect. Observed: ${finalText.slice(0, 120)}`, reproduce };
     }
     if (stateDelta?.persisted && drovePass.clicked) return { ...base, verdict: 'passed', detail: `${step.phase} step confirmed BY OBSERVED EFFECT — the mutating action wrote to localStorage and it PERSISTED across a reload (storage ${stateDelta.before.storageHash.slice(0,6)}→${stateDelta.afterReload?.storageHash.slice(0,6)}, ${stateDelta.before.storageBytes}→${stateDelta.afterReload?.storageBytes ?? stateDelta.after.storageBytes} bytes). No UI toast, but the write is real.`, reproduce };
@@ -1057,7 +1061,7 @@ export async function runStep(runId: string, baseUrl: string, step: BreakStep, m
     // mechanical proof (failure signal + a committed write that survived reload). Checked FIRST — it outranks both the
     // accept-is-defect and the clean-held readings, because "committed while claiming failure" is a defect regardless of
     // what the input was. Guarded by the pure oracle (persisted AND a failure signal) so a clean accept never brokes.
-    if (brokeOnApplyDespiteFailure(`${finalText} ${observed}`, has5xx || hasStack, true)) {
+    if (brokeOnApplyDespiteFailure(`${transientAlerts} ${finalText} ${observed}`, has5xx || hasStack, true)) {
       return { ...base, verdict: 'broke', cause: 'file-ticket', detail: `APPLIED DESPITE FAILURE — the app reported the action FAILED (failure toast / ${has5xx || hasStack ? '5xx/stack' : '"(500)" message'}) but the write PERSISTED anyway: ${ev}. The app lied about failing and left the data changed — a real defect. Observed: ${finalText.slice(0, 120)}`, reproduce };
     }
     if (step.acceptIsDefect) {
