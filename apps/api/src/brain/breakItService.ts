@@ -88,6 +88,29 @@ export function deriveResolution(f: BreakFinding): Resolution {
   return oracleQ();
 }
 
+// ── DROP-GATE PURE LOGIC (extracted 2026-08-30 so it's hermetically testable — a server crash can never truncate a
+// unit assertion the way it truncates an end-to-end run). Decides which LIVE field labels the drop-gate trusts.
+type LiveField = { label?: string; kind?: string };
+/** The authoritative field-label set for the SUBTRACTIVE drop decision. When we reached the feature's own MODAL
+ * (bounded surface), the COHORT is complete and authoritative — the union may also carry ambient PAGE inputs captured
+ * before the modal opened (an orders "Search customer…" box) which are NOT the feature's fields, so trusting the union
+ * let a phantom "Overflow Search customer…" survive. A field-less action modal ⇒ empty cohort ⇒ every field attack
+ * drops. On page/wizard scope the union is right (fields span steps). modal ⇒ cohort labels; else ⇒ union labels. */
+export function dropLabelSet(liveScope: 'modal' | 'page' | undefined, cohortScoped: LiveField[], liveScoped: LiveField[]): Set<string> {
+  const src = liveScope === 'modal' ? cohortScoped : liveScoped;
+  return new Set(src.map((f) => String(f.label || '').toLowerCase().trim()));
+}
+/** True iff an attack step's fill targets are ALL present in the live label set (so it can actually land). A non-fill
+ * attack (click-action / api / pure-intent, no fields) is always kept. Fuzzy substring both ways (a live "flag reason"
+ * covers a step field "reason"). This is the drop predicate: keep when true, drop when false (only when trustworthy). */
+export function stepTargetsLiveField(step: { fields?: Array<{ name?: string }> }, liveLabels: Set<string>): boolean {
+  const norm = (s?: string) => String(s || '').toLowerCase().trim();
+  const fills = (step.fields || []).map((f) => norm(f.name));
+  if (fills.length === 0) return true;
+  const labels = [...liveLabels];
+  return fills.every((fn) => labels.some((ll) => ll.includes(fn) || fn.includes(ll)));
+}
+
 export interface BreakOpts { repo: string; feature: string; flowId?: string; destructiveAck?: boolean; creds?: { email?: string; password?: string }; scope?: string; quick?: boolean; }
 // quick = happy/crud phases ONLY (skip the ~20 adversarial+api attacks). For a mission "create X and verify" request
 // the user wants "does creating work + what happens after", NOT a full adversarial sweep — quick gets it from ~40min
@@ -409,11 +432,16 @@ async function runBreakIt(runId: string, projectId: string, baseUrl: string, opt
         // CONSTRUCTION set = ONE co-present cohort (fields that actually co-exist in the DOM). Filling the union stalls
         // the submit (cross-wizard-step fields never co-exist) → this is what the attacks/precondition fill from.
         const cohortScoped = (cohort && cohort.length ? cohort : live).filter((f: any) => !isLoginField((f.label || '').toLowerCase(), (f.kind || '').toLowerCase()));
-        const liveLabels = new Set(liveScoped.map((f: any) => String(f.label || '').toLowerCase().trim()));
-        const norm = (s: string) => String(s || '').toLowerCase().trim();
+        // DROP-GATE FIELD SET: when we reached the feature's own MODAL (bounded surface), the COHORT is the complete,
+        // authoritative field list — the union may also carry ambient PAGE inputs captured before the modal opened (the
+        // orders "Search customer…" box), which are NOT the feature's fields. Using the union here let a phantom
+        // "Overflow Search customer…" survive the drop (it looked "live" because the page box was in the union). For a
+        // field-less action modal the cohort is EMPTY → every field attack correctly drops. On a page/wizard scope the
+        // union is the right discovery set (fields span steps). So: modal ⇒ cohort labels; page ⇒ union labels.
+        const liveLabels = dropLabelSet((opts as any)._liveScopeSeen, cohortScoped, liveScoped);   // modal ⇒ cohort; else ⇒ union
         // an attack step FILLS a field iff that field's label is live. A stale SoA/scaffold attack whose target field
         // isn't on the page can NEVER land → DROP it. Keep non-fill attacks (click-action, api, pure-intent) as-is.
-        const targetsLiveField = (s: any) => { const fills = (s.fields || []).map((f: any) => norm(f.name)); return fills.length === 0 || fills.every((fn: string) => [...liveLabels].some((ll) => ll.includes(fn) || fn.includes(ll))); };
+        const targetsLiveField = (s: any) => stepTargetsLiveField(s, liveLabels);
         // FIX 1 — DROP STALE PHANTOM-FIELD ATTACKS, BUT ONLY WHEN THE CAPTURE IS TRUSTWORTHY (2026-08-30). Dropping is
         // SUBTRACTIVE — it removes coverage — so it's safe ONLY when liveFields is a COMPLETE surface. That's true when
         // a capture landed inside the feature's own modal/dialog (liveScope==='modal': a bounded form). If we only saw
