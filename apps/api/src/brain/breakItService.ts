@@ -399,10 +399,18 @@ async function runBreakIt(runId: string, projectId: string, baseUrl: string, opt
   }
 
   if (!plan.length) {
-    emit(runId, { type: 'test:think', message: 'No attack plan and no observed form fields to derive attacks from (the feature may be too thin, or the crawl recorded no typed fields).' });
-    emit(runId, { type: 'test:phase', phase: 'done', label: 'No plan', kind: 'breakit' });
+    // NO-SILENT-EMPTY-PASS (2026-08-30): this path used to write status:'passed' with NO artifact — a run that reports
+    // SUCCESS while having done nothing. That's the exact bug behind mission's empty sub-run: mission launches break-it,
+    // the SoA plan + capture-probe both time out under the mission's concurrent SoA load → empty plan → this path →
+    // "passed, 0 findings", which mission reads as a stub. A run that produced no plan did NOT succeed — write an
+    // HONEST artifact naming why, and mark it 'failed' (needs-review), never a green pass. (Same invariant env-matrix's
+    // honestStatus(0,0,0) and api-test's empty loop want: no work done ⇒ say so, never a silent success.)
+    const why = 'No attack plan could be derived — the SoA planner returned nothing AND the live-capture probe found no attackable surface (both can happen under load / an LLM-bridge timeout, or on a feature the crawl recorded no fields/actions for). This is NOT a clean pass: no attack ran. Re-run; if it persists, re-crawl the feature or check the SoA bridge.';
+    emit(runId, { type: 'test:think', message: why });
+    emit(runId, { type: 'test:phase', phase: 'done', label: 'No plan — nothing tested', kind: 'breakit' });
     emit(runId, { type: 'test:done', passed: 0, failed: 0, skipped: 0, total: 0 });
-    store.updateTestRun(runId, { status: 'passed', finishedAt: new Date().toISOString() });
+    store.updateTestRun(runId, { status: 'failed', finishedAt: new Date().toISOString(),
+      artifacts: [{ kind: 'break-it', feature: opts.feature, marker, findings: [{ phase: 'adversarial', title: `No attacks could be planned for "${opts.feature}"`, verdict: 'needs-review', detail: why, cause: 'unreachable', codeRef: null, resolution: { kind: 'unreachable' } }], frames: [] } as any] } as any);
     return;
   }
   emit(runId, { type: 'test:think', message: `${plan.length} checks (${plan.length - scaffold.length} from SoA + ${scaffold.length} scaffold-enforced): ${countByPhase(plan)}. Every attack has a pre-declared oracle, so a "broke" is mechanically checkable.` });
