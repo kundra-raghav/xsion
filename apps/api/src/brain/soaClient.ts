@@ -65,14 +65,31 @@ export function bridgePayloadIsRetryable(res: any): boolean {
 // model for a task is `XSION_MODEL_<TASK>` (e.g. XSION_MODEL_AUDIT=anthropic/claude-sonnet-4-5), falling back to a
 // global SOA_PPLX_MODEL pin, else the bridge's own turn-type router (today's behavior). ALL UNSET BY DEFAULT → routing
 // is opt-in and behavior is unchanged until an env var is set; a winning A/B flips one var, not code. Exported for test.
+// SHIPPED DEFAULT ROUTING TABLE: data-backed per-task model defaults. audit→sonnet is justified by an A/B on the REAL
+// crawl surface (Kimi 2/4 non-empty with 3/4 UNPARSEABLE; Sonnet 3/4 non-empty, avg 3.3, ZERO unparseable — parse
+// reliability is the load-bearing metric for a security engine). Everything else stays '' = the bridge's own router
+// (Kimi strong-tier), which the same A/B showed is fast enough for breakit's cap and fine elsewhere. An env var
+// (XSION_MODEL_<TASK>) overrides the default; setting it to '' forces back to the router.
+const _MODEL_DEFAULTS: Record<string, string> = {
+  audit: 'anthropic/claude-sonnet-4-5',
+};
 export function modelForTask(task: string, env: NodeJS.ProcessEnv = process.env): string {
-  const perTask = env[`XSION_MODEL_${String(task || '').toUpperCase().replace(/[^A-Z0-9]/g, '_')}`];
-  return (perTask || env.SOA_PPLX_MODEL || '').trim();
+  const key = `XSION_MODEL_${String(task || '').toUpperCase().replace(/[^A-Z0-9]/g, '_')}`;
+  // an env var — even set to empty — is authoritative (empty ⇒ force the router, overriding any shipped default).
+  if (key in env) return String(env[key] || '').trim();
+  return (env.SOA_PPLX_MODEL || _MODEL_DEFAULTS[String(task || '').toLowerCase()] || '').trim();
 }
 
-function runBridgeOnce(args: string[], timeoutMs: number): Promise<any> {
+// A pinned model can become UNPROVISIONED (the bridge's soa_backend documents claude-sonnet-5 → 400). If a pinned call
+// fails that way, fall back to the router (unpinned) rather than fail every call — the pin is advisory, not a hard dep.
+export function bridgeErrorIsProvisioning(errMessage: string): boolean {
+  return /unprovisioned|not provisioned|not enabled|does not have access|not authorized to use|invalid[_ ]request|unrecognized|400/i.test(errMessage);
+}
+
+// forceUnpinned: the provisioning-fallback attempt clears the pin so the bridge's router picks a live model.
+function runBridgeOnce(args: string[], timeoutMs: number, forceUnpinned = false): Promise<any> {
   return new Promise((resolve, reject) => {
-    const pinned = modelForTask(args[0]);
+    const pinned = forceUnpinned ? '' : modelForTask(args[0]);
     const env = {
       ...process.env,
       SOA_BACKEND: process.env.SOA_BACKEND || 'perplexity',
@@ -116,6 +133,7 @@ function runBridgeOnce(args: string[], timeoutMs: number): Promise<any> {
 // 2 attempts total. Every other failure (timeout, spawn error) propagates immediately — no wasted second wait.
 async function runBridge(args: string[], timeoutMs = 240_000): Promise<any> {
   const MAX_ATTEMPTS = 2;
+  const hasPin = !!modelForTask(args[0]);   // is this task routed to a specific model?
   let lastErr: any;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
@@ -129,7 +147,14 @@ async function runBridge(args: string[], timeoutMs = 240_000): Promise<any> {
       return res;
     } catch (e: any) {
       lastErr = e;
-      if (attempt < MAX_ATTEMPTS && bridgeErrorIsRetryable(String(e?.message || e))) {
+      const msg = String(e?.message || e);
+      // PROVISIONING FALLBACK: a pinned model can be unprovisioned (400). Retry ONCE UNPINNED so the router picks a
+      // live model — the pin is advisory, never a hard dependency that fails every call. Only when a pin was in effect.
+      if (attempt < MAX_ATTEMPTS && hasPin && bridgeErrorIsProvisioning(msg)) {
+        console.log(`[XSION][soa] "${args[0]}" pinned model failed (${msg.slice(0, 50)}) — falling back to the router (unpinned)`);
+        try { return await runBridgeOnce(args, timeoutMs, true); } catch (e2: any) { throw e2; }
+      }
+      if (attempt < MAX_ATTEMPTS && bridgeErrorIsRetryable(msg)) {
         console.log(`[XSION][soa] "${args[0]}" returned empty/unparseable — retrying (attempt ${attempt + 1}/${MAX_ATTEMPTS})`);
         await new Promise((r) => setTimeout(r, 800));
         continue;
