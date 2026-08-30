@@ -170,19 +170,30 @@ export function rollupActions(steps: any[]): Array<{ kind: string; count: number
   return Object.entries(counts).map(([kind, count]) => ({ kind, count, label: `${count}× ${LABEL[kind] || kind}` }));
 }
 
-function summarizeArtifact(run: any, art: any): string {
+export function summarizeArtifact(run: any, art: any): string {
   if (art.kind === 'break-it') {
+    // COUNT ALL REAL VERDICTS (2026-08-30): the old summary counted only broke+needs-review, DROPPING held and passed
+    // — so a run of "2 held, 4 needs-review" reported "held (4 needs-review)" and the 2 real HELD verdicts vanished
+    // from the mission report (mission looked empty even when break-it produced real results). Report every verdict.
     const fs = art.findings || [];
     const broke = fs.filter((f: any) => f.verdict === 'broke').length;
+    const held = fs.filter((f: any) => f.verdict === 'held' || f.verdict === 'passed').length;
     const nr = fs.filter((f: any) => f.verdict === 'needs-review').length;
-    return broke ? `${broke} broke, ${nr} needs-review` : `held (${nr} needs-review)`;
+    const parts: string[] = [];
+    if (broke) parts.push(`${broke} broke`);
+    if (held) parts.push(`${held} held`);
+    if (nr) parts.push(`${nr} needs-review`);
+    return parts.length ? parts.join(', ') : (fs.length ? `${fs.length} finding(s)` : 'no findings');
   }
   if (art.kind === 'bug-repro') return art.verdict || 'done';
-  if (art.kind === 'security-audit') { const v = (art.findings || []).filter((f: any) => f.verdict === 'vulnerable').length; return v ? `${v} vulnerable` : 'clean'; }
-  if (art.kind === 'env-matrix') { const f = (art.results || []).filter((r: any) => r.status === 'fail').length; return f ? `${f} conditions failed` : 'all conditions passed'; }
+  if (art.kind === 'security-audit') { const v = (art.findings || []).filter((f: any) => f.verdict === 'vulnerable').length; const r = (art.findings || []).filter((f: any) => f.verdict === 'needs-review').length; return v ? `${v} vulnerable` : (r ? `${r} to review (code-cited)` : 'clean'); }
+  if (art.kind === 'env-matrix') { const f = (art.results || []).filter((r: any) => r.status === 'fail').length; const p = (art.results || []).filter((r: any) => r.status === 'pass').length; return f ? `${f} of ${f + p} conditions failed` : `all ${p} conditions passed`; }
+  // FLOW branch (2026-08-30): mission steps can run a mapped flow (engine==='flow'); without this branch it fell through
+  // to run.summary (usually just "Mission"), losing the flow's actual pass/fail. Report the step tally.
+  if (art.kind === 'flow') { const sr = art.stepResults || art.results || []; const f = sr.filter((s: any) => s.status === 'fail').length; const p = sr.filter((s: any) => s.status === 'pass').length; return sr.length ? (f ? `${f} of ${f + p} steps failed` : `all ${p} steps passed`) : 'flow ran'; }
   // api: report the per-probe tally (findings, NOT the run status) so the mission summary matches the runs-list
   // "N pass · N fail" — a fail is a finding, not a failed run (mirrors the status=executed reframe in apiTestService).
-  if (art.kind === 'api') { const f = (art.results || []).filter((r: any) => r.status === 'fail').length; const p = (art.results || []).filter((r: any) => r.status === 'pass').length; return f ? `${f} of ${p + f} endpoints flagged` : `${p} endpoints OK`; }
+  if (art.kind === 'api') { const f = (art.results || []).filter((r: any) => r.status === 'fail').length; const p = (art.results || []).filter((r: any) => r.status === 'pass').length; return (f || p) ? (f ? `${f} of ${p + f} endpoints flagged` : `${p} endpoints OK`) : 'no HTTP endpoints on this app'; }
   return run.summary || 'done';
 }
 
