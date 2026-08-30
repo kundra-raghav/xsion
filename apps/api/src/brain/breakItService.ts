@@ -111,6 +111,18 @@ export function stepTargetsLiveField(step: { fields?: Array<{ name?: string }> }
   return fills.every((fn) => labels.some((ll) => ll.includes(fn) || fn.includes(ll)));
 }
 
+// ── APPLIED-DESPITE-FAILURE ORACLE (2026-08-30) — the nastiest real bug class, catchable as a hard BROKE. An app that
+// tells the user the action FAILED (a "(500)"/"failed"/"error" toast, a rendered stack, a 5xx) but WHOSE WRITE
+// PERSISTED anyway has lied about failing and left the data changed — a genuine defect (torture's api() does exactly
+// this: `if(appliedAnyway){MUT[action](); persist()}` then resolves {ok:false,status:500}). This is DIFFERENT from a
+// clean accept (persisted + no failure signal = held): the defining signal is a FAILURE MESSAGE alongside a REAL
+// committed write. Pure so it's hermetic-tested — a false broke burns the moat, and this rule MINTS brokes.
+const FAILURE_SIGNAL = /\(500\)|\b50[0-9]\b|went wrong|failed|failure|error occurred|could not|couldn'?t save|try again|please retry/i;
+export function brokeOnApplyDespiteFailure(observedFailureText: string, has5xxOrStack: boolean, persisted: boolean): boolean {
+  if (!persisted) return false;   // no committed write ⇒ nothing was wrongly applied
+  return has5xxOrStack || FAILURE_SIGNAL.test(String(observedFailureText || ''));
+}
+
 /** Single-source plan de-dup: keep the FIRST step of each title (case-insensitive), drop later duplicates. Every plan
  * assembly (scaffold + regeneration + click-attacks + create-precondition) routes through this so two generators can't
  * both add the same attack — the duplicate "manual-review" that a capture-probe + regen once produced. Order-stable. */
@@ -965,6 +977,9 @@ export async function runStep(runId: string, baseUrl: string, step: BreakStep, m
     // that PERSISTED across a reload = the create/update really happened (held/passed, earned by inspection, no toast
     // needed). A change that REVERTED = optimistic/apply-then-fail (torture's 500-that-still-applied) → still uncertain.
     // NO change at all after a valid create = the write was silently dropped → a real, honest problem to surface.
+    if (stateDelta?.persisted && drovePass.clicked && brokeOnApplyDespiteFailure(`${finalText} ${observed}`, has5xx || hasStack, true)) {
+      return { ...base, verdict: 'broke', cause: 'file-ticket', detail: `APPLIED DESPITE FAILURE — the ${step.phase} action reported FAILURE (failure toast / 5xx) but the write PERSISTED across a reload. The app lied about failing and committed the change anyway — a real defect. Observed: ${finalText.slice(0, 120)}`, reproduce };
+    }
     if (stateDelta?.persisted && drovePass.clicked) return { ...base, verdict: 'passed', detail: `${step.phase} step confirmed BY OBSERVED EFFECT — the mutating action wrote to localStorage and it PERSISTED across a reload (storage ${stateDelta.before.storageHash.slice(0,6)}→${stateDelta.afterReload?.storageHash.slice(0,6)}, ${stateDelta.before.storageBytes}→${stateDelta.afterReload?.storageBytes ?? stateDelta.after.storageBytes} bytes). No UI toast, but the write is real.`, reproduce };
     if (stateDelta && stateDelta.changed && stateDelta.reverted) return { ...base, verdict: 'needs-review', cause: 'answer-oracle', detail: `${step.phase} step changed state momentarily but it did NOT survive a reload (optimistic update or apply-then-fail). Not a confirmed write. Observed: ${finalText.slice(0, 100)}`, reproduce };
     // no state change: honest needs-review (we can't be SURE the action fully drove vs the write dropped — don't
@@ -1009,6 +1024,14 @@ export async function runStep(runId: string, baseUrl: string, step: BreakStep, m
   // random-failure blip never manufactures a broke.
   if (stateDelta?.persisted && drovePass.clicked) {   // gate on the submit ACTUALLY firing — a no-op click + a reload diff must never reach a verdict
     const ev = `localStorage changed and PERSISTED across a reload (storage ${stateDelta.before.storageHash.slice(0,6)}→${stateDelta.afterReload?.storageHash.slice(0,6)}, ${stateDelta.before.storageBytes}→${stateDelta.afterReload?.storageBytes ?? stateDelta.after.storageBytes} bytes)`;
+    // APPLIED-DESPITE-FAILURE (the nastiest real bug): the app told the user it FAILED (a "(500)"/failed toast, a
+    // rendered 5xx/stack) but the write PERSISTED anyway → it lied and left the data changed. A hard BROKE with
+    // mechanical proof (failure signal + a committed write that survived reload). Checked FIRST — it outranks both the
+    // accept-is-defect and the clean-held readings, because "committed while claiming failure" is a defect regardless of
+    // what the input was. Guarded by the pure oracle (persisted AND a failure signal) so a clean accept never brokes.
+    if (brokeOnApplyDespiteFailure(`${finalText} ${observed}`, has5xx || hasStack, true)) {
+      return { ...base, verdict: 'broke', cause: 'file-ticket', detail: `APPLIED DESPITE FAILURE — the app reported the action FAILED (failure toast / ${has5xx || hasStack ? '5xx/stack' : '"(500)" message'}) but the write PERSISTED anyway: ${ev}. The app lied about failing and left the data changed — a real defect. Observed: ${finalText.slice(0, 120)}`, reproduce };
+    }
     if (step.acceptIsDefect) {
       return { ...base, verdict: 'broke', cause: 'file-ticket', detail: `the app ACCEPTED+COMMITTED input the oracle said it must reject — proven BY OBSERVED EFFECT (no toast needed): ${ev}. "${step.expectBroke}".`, reproduce };
     }
