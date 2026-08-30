@@ -316,7 +316,51 @@ async function runBreakIt(runId: string, projectId: string, baseUrl: string, opt
     }
   }
   if (learnedFromForm) emit(runId, { type: 'test:think', message: `Using ${learnedFromForm} field(s) the crawler learned by opening the "${opts.feature}" form (title/date/etc.) — attacking the REAL create form, not just surface inputs.` });
+
+  // ── CAPTURE-ONLY PROBE (2026-08-30, re-added now the dedup prerequisite exists): when the crawl learned NO form for
+  // this feature (learnedFromForm===0), observedFields fell back to SCRAPING the page's ambient inputs (torture's Flag:
+  // the orders "Search customer…" / "e.g. Doon Logistics" boxes) → a doomed "Overflow Doon Logistics" attack that runs
+  // before regen can drop it. Fix: run ONE zero-step executeFlow with reachFeature to REACH the feature's real surface
+  // BEFORE planning, and build observedFields from GROUND TRUTH. A field-less action modal (Flag's presets) → NO field
+  // attacks, only modal-clicks (seeded from _liveModalActionsSeen). Branch on SCOPE first (a modal capture with zero
+  // fields is field-less; the cohort may be stale from a pre-modal page capture, so scope — not cohort — decides).
+  // Gated: only when the crawl gave us nothing (learnedFromForm===0) AND authorized (it navigates). XSION_NO_PROBE=1 off.
+  if (learnedFromForm === 0 && authorized && process.env.XSION_NO_PROBE !== '1') {
+    try {
+      const probeOpts = { allowMutations: false, marker, reachFeature: opts.feature, reachNavCache: (opts as any)._reachNavCache } as any;
+      const probe = await withDeadline(Number(process.env.XSION_PROBE_CAP_MS) || 45000, `break-it capture-probe "${opts.feature}"`,
+        executeFlow({ name: `probe:${opts.feature}`, role: 'tester', steps: [] } as any, baseUrl, { onConsoleError: () => {} }, undefined, opts.creds, probeOpts));
+      const pScope = (probe as any).liveScope;
+      const pCohort = ((probe as any).liveCohort || []) as ObservedField[];
+      const pModalActs = ((probe as any).liveModalActions || []) as string[];
+      if (pScope === 'modal') {
+        // reached the feature's OWN modal → it is the authoritative surface. Its fields (if any) are the attack targets;
+        // if none, it's a click-only action modal → drop the scraped ambient fields entirely, click-attack the presets.
+        const modalFields = pCohort.filter((f) => !isLoginField((f.label || '').toLowerCase(), (f.kind || '').toLowerCase()));
+        observedFields.length = 0; seenLabel.clear();
+        for (const f of modalFields) pushField({ label: f.label, kind: f.kind, required: f.required });
+        if (pModalActs.length) (opts as any)._liveModalActionsSeen = pModalActs;
+        if ((probe as any).liveScope) (opts as any)._liveScopeSeen = pScope;
+        emit(runId, { type: 'test:think', message: modalFields.length
+          ? `Capture-probe reached the "${opts.feature}" modal: ${modalFields.length} live field(s) — attacking GROUND TRUTH, not the scraped page inputs.`
+          : `Capture-probe: the "${opts.feature}" surface is a field-less action modal (${pModalActs.length} preset action(s)) — no field attacks; click-attacking the modal's own actions.` });
+      }
+      // pScope==='page'/undefined → keep the crawl-derived fields (no evidence the ambient inputs aren't the feature's).
+    } catch (e) { emit(runId, { type: 'test:think', message: `Capture-probe skipped (${String((e as Error)?.message || e).slice(0, 50)}) — using the crawl-derived fields.` }); }
+  }
+
   const scaffold = observedFields.length ? scaffoldMissing(observedFields, plan) : [];
+  // FIELD-LESS FEATURE seed: no scaffold fields but the probe found modal actions → seed the click-attacks directly so
+  // the plan is non-empty and the modal-click attacks run (dedupeByTitle in the regen block prevents any duplication).
+  const _probeModalActs = (opts as any)._liveModalActionsSeen as string[] | undefined;
+  if (!observedFields.length && _probeModalActs?.length) {
+    const seeds = dedupeByTitle(_probeModalActs.filter((a) => !/^(sign in|logout|@|notifications|✕|cancel|close|back)/i.test(a)).slice(0, 6).map((a) => ({
+      phase: 'adversarial' as const, title: `Click action "${a}" and verify effect`, intent: `click "${a}"`, fields: [] as any[], acceptIsDefect: false, value: a,
+      apiHint: '', expectHeld: 'the action completes without a crash/5xx', expectBroke: 'the action throws / 5xx / corrupts state', codeRef: null, _scaffold: true,
+    } as any)));
+    plan.push(...seeds);
+    if (seeds.length) emit(runId, { type: 'test:think', message: `Seeded ${seeds.length} click-action attack(s) from the "${opts.feature}" modal (${_probeModalActs.join(', ')}).` });
+  }
   if (scaffold.length) emit(runId, { type: 'test:think', message: `Enforcing coverage: added ${scaffold.length} invariant attack(s) the plan didn't include (empty/overflow/type/ordering per observed field) — so coverage is the SAME every run, not left to chance.` });
   // SCAFFOLD-FIRST WITHIN EACH PHASE: the scaffold's attacks carry VERIFIED acceptIsDefect semantics + crawler-LEARNED
   // field labels (e.g. the empty-required "1-5"); SoA's steps are speculative and often name fields that don't exist on
@@ -446,7 +490,14 @@ async function runBreakIt(runId: string, projectId: string, baseUrl: string, opt
         const liveScoped = live.filter((f: any) => !isLoginField((f.label || '').toLowerCase(), (f.kind || '').toLowerCase()));
         // CONSTRUCTION set = ONE co-present cohort (fields that actually co-exist in the DOM). Filling the union stalls
         // the submit (cross-wizard-step fields never co-exist) → this is what the attacks/precondition fill from.
-        const cohortScoped = (cohort && cohort.length ? cohort : live).filter((f: any) => !isLoginField((f.label || '').toLowerCase(), (f.kind || '').toLowerCase()));
+        // CONSTRUCTION source: the cohort (co-present fields). Fall back to the union ONLY when we did NOT reach a modal
+        // — a MODAL-scoped feature with an EMPTY cohort is legitimately field-less (Flag's presets), so falling back to
+        // the union here would re-introduce a page input (the orders "Search customer…" box) as a doomed overflow. When
+        // modal + empty cohort ⇒ NO field construction (the click-attacks carry the coverage). This is the same
+        // union-carries-page-input leak fixed at plan-time (probe) and in the drop-gate — closed here too.
+        const _regenScope = (opts as any)._liveScopeSeen as ('modal' | 'page' | undefined);
+        const _constructionSrc = (cohort && cohort.length) ? cohort : (_regenScope === 'modal' ? [] : (live || []));
+        const cohortScoped = _constructionSrc.filter((f: any) => !isLoginField((f.label || '').toLowerCase(), (f.kind || '').toLowerCase()));
         // DROP-GATE FIELD SET: when we reached the feature's own MODAL (bounded surface), the COHORT is the complete,
         // authoritative field list — the union may also carry ambient PAGE inputs captured before the modal opened (the
         // orders "Search customer…" box), which are NOT the feature's fields. Using the union here let a phantom
