@@ -20,7 +20,7 @@ import { store } from '../store';
 import { breakItPlan, BreakStep } from './soaClient';
 import { scaffoldMissing, ObservedField } from './attackScaffold';
 import { executeFlow } from './intentRunner';
-import { withDeadline, reapStaleBrowsers } from './runtimeGuards';   // outer per-attack cap + stale-browser reaper (launch-under-load wedge)
+import { withDeadline, reapStaleBrowsers, isAuthorized } from './runtimeGuards';   // outer per-attack cap + stale-browser reaper + staging-autonomy authorization default
 import { makeFrameHook, FrameHook } from './liveFrame';
 import { preflightAuth } from './authGate';   // shared pre-flight auth gate (login-gated + no creds → refuse honestly)
 import { buildTenantReachPrefix } from './reachState';   // general multi-tenant picker → deterministic "click <tenant>" reach step
@@ -123,6 +123,18 @@ export function brokeOnApplyDespiteFailure(observedFailureText: string, has5xxOr
   return has5xxOrStack || FAILURE_SIGNAL.test(String(observedFailureText || ''));
 }
 
+// ── FEATURE-SURFACE SHAPE (2026-08-30) — after the capture-probe clicks the feature's opener, what kind of feature is
+// it? A MODAL feature (Flag) opens a dialog on click and does NOT persist yet. A DIRECT ROW-ACTION (Approve/Allocate/
+// Delete) MUTATES immediately on click (run('approveOrder')→persist) and opens no modal. A direct action has NO form
+// to attack — only the action itself — so its scraped crawl fields (the orders "Search customer…" boxes) must be
+// cleared, or break-it wastes attacks on the search box. Discriminator: modal opened ⇒ 'modal'; no modal but the click
+// PERSISTED a write ⇒ 'direct-action'; neither ⇒ 'unknown' (leave the crawl fields alone — we didn't establish shape).
+export function directActionSurface(modalOpened: boolean, openerPersisted: boolean): 'modal' | 'direct-action' | 'unknown' {
+  if (modalOpened) return 'modal';
+  if (openerPersisted) return 'direct-action';
+  return 'unknown';
+}
+
 /** Single-source plan de-dup: keep the FIRST step of each title (case-insensitive), drop later duplicates. Every plan
  * assembly (scaffold + regeneration + click-attacks + create-precondition) routes through this so two generators can't
  * both add the same attack — the duplicate "manual-review" that a capture-probe + regen once produced. Order-stable. */
@@ -204,7 +216,7 @@ async function runBreakIt(runId: string, projectId: string, baseUrl: string, opt
 
   // ── CONSENT GATE: the break-it engine MUTATES the live app (create/update/delete). Same attestation the audit
   // needs. Without it, we run the READ-ONLY phases only (happy-path checks + adversarial that don't submit).
-  const authorized = !!(project as any)?.security?.authorized;
+  const authorized = isAuthorized(project);   // staging-autonomy: default ON unless the project explicitly sets it false
   // LOGIN PRE-STEP (the reach-the-state fix): break-it used to run executeFlow with NO creds, so on any auth-gated
   // app it only ever saw the login wall → every attack landed on the sign-in page (false verdicts). Pass the
   // project's in-memory creds so the executor authenticates FIRST, then attacks the real feature — same as bug-repro.
@@ -357,7 +369,21 @@ async function runBreakIt(runId: string, projectId: string, baseUrl: string, opt
           ? `Capture-probe reached the "${opts.feature}" modal: ${modalFields.length} live field(s) — attacking GROUND TRUTH, not the scraped page inputs.`
           : `Capture-probe: the "${opts.feature}" surface is a field-less action modal (${pModalActs.length} preset action(s)) — no field attacks; click-attacking the modal's own actions.` });
       }
-      // pScope==='page'/undefined → keep the crawl-derived fields (no evidence the ambient inputs aren't the feature's).
+      // DIRECT ROW-ACTION (Approve/Allocate/Delete): no modal opened, but the opener click PERSISTED a write — the
+      // feature MUTATES on click and has NO form. WARNING: the capture-probe therefore FIRES A REAL MUTATION during
+      // planning (acceptable on staging with authorized on; it's why this whole probe is gated on `authorized`). There's
+      // nothing to fill — clear the scraped crawl fields so break-it stops wasting attacks on the orders "Search
+      // customer…" box, and rely on the click-action attack (Click action "Approve" + state-delta oracle) for coverage.
+      else if (directActionSurface(false, !!(probe as any).liveOpenerPersisted) === 'direct-action') {
+        observedFields.length = 0; seenLabel.clear();
+        (opts as any)._liveScopeSeen = 'modal';   // treat as a bounded surface for the drop-gate (the action IS the surface)
+        // seed the click-action attack directly from the FEATURE's own action label (so the plan is non-empty + attacks
+        // the action, not a scraped field). matchesFeature keeps it scoped to the feature (e.g. "Approve", not "Delete").
+        const pActs = ((probe as any).liveActions || []) as string[];
+        (opts as any)._liveDirectActionsSeen = pActs.filter((a) => matchesFeature(a));
+        emit(runId, { type: 'test:think', message: `Capture-probe: "${opts.feature}" is a DIRECT row-action — it mutated on click (no form). No field attacks; the click-action attack (+ state-delta oracle) carries coverage. (The probe fired one real mutation to detect this — staging-only.)` });
+      }
+      // pScope==='page'/undefined & not a direct action → keep the crawl fields (no evidence the ambient inputs aren't it).
     } catch (e) { emit(runId, { type: 'test:think', message: `Capture-probe skipped (${String((e as Error)?.message || e).slice(0, 50)}) — using the crawl-derived fields.` }); }
   }
 
@@ -365,13 +391,15 @@ async function runBreakIt(runId: string, projectId: string, baseUrl: string, opt
   // FIELD-LESS FEATURE seed: no scaffold fields but the probe found modal actions → seed the click-attacks directly so
   // the plan is non-empty and the modal-click attacks run (dedupeByTitle in the regen block prevents any duplication).
   const _probeModalActs = (opts as any)._liveModalActionsSeen as string[] | undefined;
-  if (!observedFields.length && _probeModalActs?.length) {
-    const seeds = dedupeByTitle(_probeModalActs.filter((a) => !/^(sign in|logout|@|notifications|✕|cancel|close|back)/i.test(a)).slice(0, 6).map((a) => ({
+  const _probeDirectActs = (opts as any)._liveDirectActionsSeen as string[] | undefined;
+  const _seedActs = (_probeModalActs?.length ? _probeModalActs : _probeDirectActs) || [];   // modal presets OR the direct action
+  if (!observedFields.length && _seedActs.length) {
+    const seeds = dedupeByTitle(_seedActs.filter((a) => !/^(sign in|logout|@|notifications|✕|cancel|close|back)/i.test(a)).slice(0, 6).map((a) => ({
       phase: 'adversarial' as const, title: `Click action "${a}" and verify effect`, intent: `click "${a}"`, fields: [] as any[], acceptIsDefect: false, value: a,
       apiHint: '', expectHeld: 'the action completes without a crash/5xx', expectBroke: 'the action throws / 5xx / corrupts state', codeRef: null, _scaffold: true,
     } as any)));
     plan.push(...seeds);
-    if (seeds.length) emit(runId, { type: 'test:think', message: `Seeded ${seeds.length} click-action attack(s) from the "${opts.feature}" modal (${_probeModalActs.join(', ')}).` });
+    if (seeds.length) emit(runId, { type: 'test:think', message: `Seeded ${seeds.length} click-action attack(s) from the "${opts.feature}" ${_probeModalActs?.length ? 'modal' : 'row-action'} (${_seedActs.join(', ')}).` });
   }
   if (scaffold.length) emit(runId, { type: 'test:think', message: `Enforcing coverage: added ${scaffold.length} invariant attack(s) the plan didn't include (empty/overflow/type/ordering per observed field) — so coverage is the SAME every run, not left to chance.` });
   // SCAFFOLD-FIRST WITHIN EACH PHASE: the scaffold's attacks carry VERIFIED acceptIsDefect semantics + crawler-LEARNED

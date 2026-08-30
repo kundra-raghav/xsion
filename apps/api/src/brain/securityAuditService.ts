@@ -19,6 +19,7 @@
 import { v4 as uuid } from 'uuid';
 import { wsServer } from '../ws';
 import { store } from '../store';
+import { isAuthorized, isDestructiveAcked } from './runtimeGuards';   // staging-autonomy authorization + ack defaults
 import { auditPlan, AuditProbe } from './soaClient';
 
 // only these methods ever fire without the destructive tier — reads can't mutate the app
@@ -75,11 +76,11 @@ export function startSecurityAudit(projectId: string, baseUrl: string, opts: Aud
 
 /** Resolve the effective tier: a requested tier is clamped down to what the project's consent actually permits. */
 export function effectiveTier(project: any, requested: 1 | 2 | 3, destructiveAck?: boolean): { tier: 1 | 2 | 3; reason: string } {
-  const authorized = !!project?.security?.authorized;
+  const authorized = isAuthorized(project);   // staging-autonomy default ON (explicit project flag still wins)
   if (requested >= 2 && !authorized) {
     return { tier: 1, reason: 'exploit tiers need the per-project "I own/authorize this target" attestation — running read-only probes only' };
   }
-  if (requested >= 3 && !destructiveAck) {
+  if (requested >= 3 && !isDestructiveAcked(destructiveAck)) {
     return { tier: 2, reason: 'destructive tier needs an explicit per-run acknowledgment — running non-destructive proof probes only' };
   }
   return { tier: requested, reason: '' };

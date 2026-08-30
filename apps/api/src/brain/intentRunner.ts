@@ -168,6 +168,9 @@ export interface ExecResult {
   // Actions INSIDE the feature's own modal (e.g. Flag's preset buttons). Once inside the feature's modal, membership
   // is the scoping — break-it click-attacks these WITHOUT the feature-name filter that page-level actions need.
   liveModalActions?: string[];
+  // did the capture-probe's opener click PERSIST a write? true ⇒ a DIRECT row-action (mutates on click, no modal) ⇒
+  // the feature has no form to attack, so break-it clears the scraped crawl fields (Approve/Allocate ground-truth fix).
+  liveOpenerPersisted?: boolean;
 }
 
 /** Capture an APP-AGNOSTIC state snapshot. Pure observation — mechanical facts only. */
@@ -1524,6 +1527,7 @@ export async function executeFlow(flow: IntentFlow, baseUrl: string, hooks: Exec
   let liveFields: Array<{ label: string; kind: string; required: boolean }> | undefined;   // ground-truth attack surface (post-reach)
   let liveActions: string[] | undefined;
   let liveScope: 'modal' | 'page' | undefined;   // did ANY capture land inside the feature's own modal/dialog?
+  let liveOpenerPersisted = false;   // did the opener click PERSIST a write (a DIRECT row-action mutates on click, no modal)?
   const liveFieldMap = new Map<string, { label: string; kind: string; required: boolean }>();   // UNION across steps, by lc label — for DISCOVERY (does a field exist anywhere)
   const liveActionSet = new Map<string, string>();
   // COHORT (2026-08-30): the single best CO-PRESENT snapshot of fields (all in the DOM at ONE instant). The union
@@ -1783,8 +1787,15 @@ export async function executeFlow(flow: IntentFlow, baseUrl: string, hooks: Exec
         }, fw2).catch(() => '');
         if (opener) {
           hooks.onThink?.(`Opening the "${opener}" form (row-action opener) to reach its fields, then attacking inside.`);
+          // snapshot storage BEFORE the opener click → detect a DIRECT row-action (Approve/Allocate mutate on click,
+          // open no modal). A modal opener does not persist; a direct action does. This tells break-it the feature has
+          // no form to attack (only the action), so it can clear the scraped crawl fields instead of attacking them.
+          let _openerBefore: StateProbe | null = null; try { _openerBefore = await stateProbe(page); } catch {}
           await clickByLabelInPage(page, opener); await page.waitForTimeout(600);
           await captureSurface(true);   // openerConfirmed → flips liveScope to 'modal' even for a field-less action modal
+          // DIRECT-ACTION persist check: a row-action's write is async (torture api() = 400–1400ms latency then
+          // persist()). Snapshot at 600ms would miss it → wait out the write before comparing storage.
+          if (_openerBefore && (liveScope as string) !== 'modal') { try { await page.waitForTimeout(1500); const aft = await stateProbe(page); liveOpenerPersisted = probesStorageDiffer(_openerBefore, aft); } catch {} }
         }
       } catch {}
     }
@@ -2203,7 +2214,7 @@ export async function executeFlow(flow: IntentFlow, baseUrl: string, hooks: Exec
   }
 
   await browser.close().catch(() => {});
-  return { flowName: flow.name, status: failed ? 'failed' : 'passed', baseUrl, stepResults, consoleErrors, observedCalls, finalText, finalUrl, stateDelta, liveFields, liveActions, liveScope, liveCohort, liveModalActions };
+  return { flowName: flow.name, status: failed ? 'failed' : 'passed', baseUrl, stepResults, consoleErrors, observedCalls, finalText, finalUrl, stateDelta, liveFields, liveActions, liveScope, liveCohort, liveModalActions, liveOpenerPersisted };
 }
 
 // ── THE GENERAL GOAL-DRIVEN AGENT (2026-08-23) ─────────────────────────────────────────────────────────────────

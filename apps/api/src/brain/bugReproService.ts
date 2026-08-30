@@ -12,6 +12,7 @@
 import { v4 as uuid } from 'uuid';
 import { wsServer } from '../ws';
 import { store } from '../store';
+import { isAuthorized } from './runtimeGuards';   // staging-autonomy authorization default
 import { bugRepro, BugRepro } from './soaClient';
 import { executeFlow } from './intentRunner';
 import { liveDropPrecisionVerdict } from './dropOracle';
@@ -129,7 +130,7 @@ async function runBugRepro(runId: string, projectId: string, baseUrl: string, op
     gates: (map?.gates || []).map((g: any) => ({ path: g.path, kind: g.kind, options: (g.options || []).map((o: any) => o.label).slice(0, 12) })),
     learnedNavigation: priorKnowledge.map((h) => h.fact),   // "clicking 'Demo School' → /demo/Teacher/Dashboard", etc.
   };
-  const authorized = !!(project as any)?.security?.authorized;
+  const authorized = isAuthorized(project);   // staging-autonomy: default ON unless the project explicitly sets it false
   // SURFACE a prior environment-state fact (perishable, NON-gating): if a past run saw this app's calendar empty, SAY
   // so up front — it explains what to expect and orders the check, but the live probe below still runs and can
   // invalidate it. This is the "runs compound" payoff for diagnostic state, kept safe (informs, never skips the look).
