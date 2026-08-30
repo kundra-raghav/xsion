@@ -1705,7 +1705,13 @@ export async function executeFlow(flow: IntentFlow, baseUrl: string, hooks: Exec
         liveFields = [...liveFieldMap.values()]; liveActions = [...liveActionSet.values()]; liveModalActions = [...liveModalActionSet.values()];
         // COHORT: THIS snapshot is a set of CO-PRESENT fields. Score = fields.length (+50 if modal-scoped: a bounded
         // form beats a page grab of equal size). Keep the highest-scoring snapshot as the fill cohort. Never merged.
-        if (surface.fields.length) { const score = surface.fields.length + (surface.inModal ? 50 : 0); if (score > liveCohortScore) { liveCohortScore = score; liveCohort = surface.fields.slice(); } }
+        // AUTHORITATIVE MODAL RESET (2026-08-30): when this capture ran right after a confirmed opener-click, the modal
+        // IS the feature's surface — its fields are the cohort, EVEN IF EMPTY. Overwrite (don't max-score) so a stale
+        // page cohort (the orders "Search customer…" box captured pre-open) can't survive as the fill target for a
+        // field-less action modal. Without this, a field-less modal keeps the page's search box and generates a doomed
+        // "Overflow <search box>" attack. An empty cohort here correctly signals "click-only feature, no field attacks".
+        if (openerConfirmed && surface.inModal) { liveCohort = surface.fields.slice(); liveCohortScore = surface.fields.length + 50; }
+        else if (surface.fields.length) { const score = surface.fields.length + (surface.inModal ? 50 : 0); if (score > liveCohortScore) { liveCohortScore = score; liveCohort = surface.fields.slice(); } }
       } catch {}
     };
     if (opts?.reachFeature) { await captureSurface(); }   // pre-loop snapshot (seeds actions + step-1 fields)
