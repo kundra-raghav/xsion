@@ -111,6 +111,21 @@ export function stepTargetsLiveField(step: { fields?: Array<{ name?: string }> }
   return fills.every((fn) => labels.some((ll) => ll.includes(fn) || fn.includes(ll)));
 }
 
+/** Single-source plan de-dup: keep the FIRST step of each title (case-insensitive), drop later duplicates. Every plan
+ * assembly (scaffold + regeneration + click-attacks + create-precondition) routes through this so two generators can't
+ * both add the same attack — the duplicate "manual-review" that a capture-probe + regen once produced. Order-stable. */
+export function dedupeByTitle<T extends { title?: string }>(steps: T[]): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const s of steps) {
+    const k = String(s.title || '').toLowerCase().trim();
+    if (k && seen.has(k)) continue;
+    if (k) seen.add(k);
+    out.push(s);
+  }
+  return out;
+}
+
 export interface BreakOpts { repo: string; feature: string; flowId?: string; destructiveAck?: boolean; creds?: { email?: string; password?: string }; scope?: string; quick?: boolean; }
 // quick = happy/crud phases ONLY (skip the ~20 adversarial+api attacks). For a mission "create X and verify" request
 // the user wants "does creating work + what happens after", NOT a full adversarial sweep — quick gets it from ~40min
@@ -476,7 +491,10 @@ async function runBreakIt(runId: string, projectId: string, baseUrl: string, opt
         const stateDependent = (s: any) => /\b(read|verify|update|delete|retrieve|view)\b.*\b(created|item|record|it|entry|the)\b/i.test(String(s.title || s.intent || ''));
         const hasCreate = liveScoped.length > 0 || (liveActs || []).some((a) => /create|add|new|submit|save/i.test(a));
         let chained = 0;
-        const newPlan = [...plan.slice(0, i + 1), ...addition, ...remaining];
+        // DEDUP by title across the WHOLE assembled plan (not just addition-vs-remaining): the addition filter above
+        // only checked `remaining`, so a regenerated/click attack with the same title as an ALREADY-RUN step (prefix)
+        // slipped through as a duplicate. Route the whole plan through the single dedup so no two generators collide.
+        const newPlan = dedupeByTitle([...plan.slice(0, i + 1), ...addition, ...remaining]);
         if (hasCreate) {
           const out: any[] = []; let seededFor = false;
           for (const s of newPlan) {
