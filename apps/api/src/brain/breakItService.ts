@@ -653,6 +653,7 @@ export async function runStep(runId: string, baseUrl: string, step: BreakStep, m
   let absentFillers = 0;     // valid-filler fields not on the reached page (cross-page pollution) — skipped, not a failure
   let fieldAbsent = false;   // the ATTACK'S TARGET field isn't on the page → the feature isn't here → not attackable
   let anyPass = false;       // did ANY step actually land? if nothing executed, no verdict about the app is possible
+  let srForReport: any[] = [];   // the attack's step results, hoisted so the post-try verdict messages can inspect them
   try {
     // ★ RESILIENCE (evidence: 3/3 dent break-it runs wedged after gate.blocked=false, before executeFlow logged —
     // a chromium.launch()/CDP stall under a loaded server, UPSTREAM of executeFlow's inner login+step caps). Reap
@@ -670,6 +671,7 @@ export async function runStep(runId: string, baseUrl: string, step: BreakStep, m
     // zero out `sr` and force a false needs-review. Only slice when the full prefix actually executed. (reachStepCount
     // is 0 today, so this is a no-op; the guard protects a future re-enable.)
     const sr = srAll.length > reachStepCount ? srAll.slice(reachStepCount) : srAll;
+    srForReport = sr;
     // PER-STEP TIMEOUT (resilience): if any step hit the wall-clock cap, this attack was ABANDONED mid-flight — a
     // harness/network stall, NOT a verdict about the app. Surface it honestly (not buried in ordinary needs-review)
     // so the run keeps going and the finding names the harness. The browser was already closed by executeFlow's
@@ -812,7 +814,16 @@ export async function runStep(runId: string, baseUrl: string, step: BreakStep, m
   // whack-a-mole'ing: form-absent, login-wall, skipped-destructive were all THIS.) An empty-value attack legitimately
   // has 0 fills but its SUBMIT click must still land — so "nothing passed" is the honest floor either way.
   if (!anyPass) {
-    return { ...base, verdict: 'needs-review', cause: 'unreachable', detail: `couldn't run this attack — no step executed against the app (the feature/form wasn't reached, or every action was skipped). Not a verdict on the app. Observed: ${observed.slice(0, 160)}`, reproduce };
+    // HONEST MESSAGE (2026-08-30): "no step executed" is only true when NOTHING was attempted. If steps WERE attempted
+    // but none landed (a click that couldn't resolve its target, a transient failure), say THAT — the step ran, it just
+    // didn't take. Report the actual attempted step + its error so the verdict is actionable, not a blanket excuse.
+    const attempted = srForReport.filter((s: any) => s.status !== 'pass');
+    const lastErr = attempted.length ? String(attempted[attempted.length - 1]?.note || attempted[attempted.length - 1]?.attempts?.[0]?.error || '').slice(0, 120) : '';
+    const ranButFailed = attempted.length > 0 && attempted.some((s: any) => (s.attempts || []).length);
+    const detail = ranButFailed
+      ? `the attack ran but its action didn't land — ${lastErr || 'the control was attempted but the click/fill did not take'}. This is a harness/timing miss (the target may render transiently, or a transient app failure), not a confirmed defect. Observed: ${observed.slice(0, 120)}`
+      : `couldn't run this attack — the feature/form wasn't reached (no step could address the app). Not a verdict on the app. Observed: ${observed.slice(0, 140)}`;
+    return { ...base, verdict: 'needs-review', cause: 'unreachable', detail, reproduce };
   }
 
   // couldn't drive the form → the attack didn't actually reach the app; not a verdict on the app itself.
