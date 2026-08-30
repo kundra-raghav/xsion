@@ -200,6 +200,30 @@ export function probesStorageDiffer(a: StateProbe, b: StateProbe): boolean {
   return a.storageHash !== b.storageHash || Math.abs(a.storageBytes - b.storageBytes) > 0;
 }
 
+/** GOAL WALK-OFF ORACLE (2026-08-30): given the storage state before the goal acted, after it acted, and after a
+ * reload — plus an optional confirming HTTP write — decide if the goal was reached BY OBSERVED EFFECT. A goal like
+ * "flag X and confirm it saved" has no verify node, so the goal loop used to stop "honestly" even when the action
+ * committed a real persisted write. Two corroboration sources (same as the verify-open branch): a persisted storage
+ * write OR a confirming HTTP write. CRUCIAL: a storage change that does NOT survive the reload is apply-then-revert
+ * (torture's 12% 500-that-rolls-back) → NOT reached; a fake pass here is worse than the false stop we're fixing.
+ * Pure so it's hermetic-testable (this change turns stops into successes — its failure mode is a fake pass). */
+export function goalReachedByEffect(
+  before: StateProbe | null,
+  after: StateProbe | null,
+  afterReload: StateProbe | null,
+  confirmingWrite: boolean,
+): { reached: boolean; via: 'storage-persisted' | 'http-write' | null } {
+  // storage persisted = it changed after the action AND the change survived a reload (a real committed write).
+  if (before && after && afterReload) {
+    const changed = probesStorageDiffer(before, after);
+    const persisted = probesStorageDiffer(before, afterReload);
+    if (changed && persisted) return { reached: true, via: 'storage-persisted' };
+    // changed but reverted on reload → apply-then-fail → NOT a confirmed write (fall through to the HTTP check).
+  }
+  if (confirmingWrite) return { reached: true, via: 'http-write' };
+  return { reached: false, via: null };
+}
+
 /** Small intent parser: verb + a quoted-or-trailing target (+ value / drag-target). Covers the interactions bug
  * tickets require — drag-and-drop, hover, keyboard, right/double-click — not just click/fill. */
 function parseIntent(intent: string): { verb: string; target: string; value?: string; target2?: string } {
@@ -2380,11 +2404,14 @@ export async function runGoalPlanned(
   const stopBox: { v: { reason: string; reached: boolean } | null } = { v: null };
   // circuit breaker for the LLM last-resort
   let llmFails = 0; const BREAKER_K = 2;
+  let goalBeforeStorage: StateProbe | null = null;   // storage BEFORE the goal acts → the walk-off effect-oracle baseline
 
   const flow: IntentFlow = { name: `goal: ${goal.slice(0, 40)}`, role: 'agent', steps: [] };
   const result = await executeFlow(flow, baseUrl, {
     ...hooks,
     onStepsExhausted: async (page: Page, observedCalls?: ObservedCall[]): Promise<IntentStep[] | null> => {
+      // baseline storage snapshot on the FIRST call (before any sub-goal action) — for the walk-off effect oracle.
+      if (goalBeforeStorage === null) { try { goalBeforeStorage = await stateProbe(page); } catch {} }
       if (++guard > CAP) { stopBox.v = { reason: `step cap (${CAP})`, reached: false }; return null; }
       await settleUntilStable(page, 12000);
       if (!cur) {
@@ -2393,6 +2420,27 @@ export async function runGoalPlanned(
         // cannot confirm success structurally → stops HONESTLY. Never a fake pass. (The fix for the create-only
         // compileGoal over-claiming on every non-create goal — hard-target "change settings and save" false pass.)
         if (verifiedSomething) { stopBox.v = { reason: 'goal-reached (verified)', reached: true }; return null; }
+        // GENERAL WRITE-ORACLE AT WALK-OFF (2026-08-30): a goal like "Flag order X and confirm it saved" has NO verify
+        // node (it's an action, not a create-that-opens), so the write-oracle at the verify-open branch never ran — and
+        // the goal stopped "honestly" DESPITE the action having fired a real persisted write. That's a FALSE stop: the
+        // same confirmingWrite signal break-it + the verify-open branch trust (a 2xx write call with a non-error body)
+        // is right here in observedCalls. If the goal's actions produced one, the goal IS reached BY OBSERVED EFFECT —
+        // the app committed the write. TWO evidence sources (goalReachedByEffect): a persisted STORAGE write (survives
+        // a reload — the right oracle for a localStorage SPA like torture, whose api() is in-page with NO HTTP call to
+        // observe) OR a confirming HTTP write (real-app backend). Storage: snapshot now, reload, snapshot again — the
+        // exact persisted rule break-it uses (storage-only diff that survives reload; a reverted change is NOT reached).
+        const goalWrite = (observedCalls || []).find((c) => c.write && c.status >= 200 && c.status < 300 && c.okBody);
+        let after: StateProbe | null = null, afterReload: StateProbe | null = null;
+        if (goalBeforeStorage) {
+          try { after = await stateProbe(page); await page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {}); await page.waitForTimeout(500); afterReload = await stateProbe(page); } catch {}
+        }
+        const eff = goalReachedByEffect(goalBeforeStorage, after, afterReload, !!goalWrite);
+        if (eff.reached) {
+          const detail = eff.via === 'storage-persisted' ? 'a persisted write survived a reload' : `${goalWrite?.method} → ${goalWrite?.status} write committed`;
+          hooks.onThink?.(`   walk-off effect-oracle: the goal's action committed a write (${detail}). goal-reached BY OBSERVED EFFECT.`);
+          stopBox.v = { reason: `goal-reached (observed effect: ${detail})`, reached: true };
+          return null;
+        }
         stopBox.v = { reason: planHasVerify ? 'plan finished but no step verified the goal — stopping honestly, not a confirmed success' : 'acted on the goal but there is no structural check to confirm it succeeded — stopping honestly (this goal shape needs the adaptive verifier, not the create-planner)', reached: false };
         return null;
       }
