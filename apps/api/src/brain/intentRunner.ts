@@ -1787,15 +1787,8 @@ export async function executeFlow(flow: IntentFlow, baseUrl: string, hooks: Exec
         }, fw2).catch(() => '');
         if (opener) {
           hooks.onThink?.(`Opening the "${opener}" form (row-action opener) to reach its fields, then attacking inside.`);
-          // snapshot storage BEFORE the opener click → detect a DIRECT row-action (Approve/Allocate mutate on click,
-          // open no modal). A modal opener does not persist; a direct action does. This tells break-it the feature has
-          // no form to attack (only the action), so it can clear the scraped crawl fields instead of attacking them.
-          let _openerBefore: StateProbe | null = null; try { _openerBefore = await stateProbe(page); } catch {}
           await clickByLabelInPage(page, opener); await page.waitForTimeout(600);
           await captureSurface(true);   // openerConfirmed → flips liveScope to 'modal' even for a field-less action modal
-          // DIRECT-ACTION persist check: a row-action's write is async (torture api() = 400–1400ms latency then
-          // persist()). Snapshot at 600ms would miss it → wait out the write before comparing storage.
-          if (_openerBefore && (liveScope as string) !== 'modal') { try { await page.waitForTimeout(1500); const aft = await stateProbe(page); liveOpenerPersisted = probesStorageDiffer(_openerBefore, aft); } catch {} }
         }
       } catch {}
     }

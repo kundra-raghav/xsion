@@ -349,7 +349,21 @@ async function runBreakIt(runId: string, projectId: string, baseUrl: string, opt
   // attacks, only modal-clicks (seeded from _liveModalActionsSeen). Branch on SCOPE first (a modal capture with zero
   // fields is field-less; the cohort may be stale from a pre-modal page capture, so scope — not cohort — decides).
   // Gated: only when the crawl gave us nothing (learnedFromForm===0) AND authorized (it navigates). XSION_NO_PROBE=1 off.
-  if (learnedFromForm === 0 && authorized && process.env.XSION_NO_PROBE !== '1') {
+  // DIRECT-ACTION SHORT-CIRCUIT (2026-08-30): a feature whose name is a known destructive/commit VERB
+  // (approve/allocate/delete/purge/reset/reject/ship) is a ROW ACTION that mutates on click and has NO form — so it has
+  // no fields to attack, only the action. Running the capture-probe on it would CONSUME the only eligible row (approve
+  // ORD-1001 → button disappears → the real attack finds nothing). Skip the probe, clear the scraped crawl fields, and
+  // let the attack loop click-attack the action once (where the finding + state-delta oracle are real). Structural, no
+  // mutation during planning. A modal feature (Flag) is NOT in this list, so it still gets the probe.
+  const DIRECT_ACTION_VERB = /^(approve|allocate|delete|purge|reset|reject|ship|cancel|archive|deactivate|suspend|revoke)\b/i;
+  const isDirectActionFeature = learnedFromForm === 0 && DIRECT_ACTION_VERB.test(opts.feature.trim());
+  if (isDirectActionFeature) {
+    observedFields.length = 0; seenLabel.clear();
+    (opts as any)._liveScopeSeen = 'modal';   // the action IS the surface → drop-gate won't re-add scraped fields
+    (opts as any)._liveDirectActionsSeen = [opts.feature.trim()];   // seed the click-attack from the feature's own name
+    emit(runId, { type: 'test:think', message: `"${opts.feature}" is a DIRECT row-action (mutating verb) — no form to attack. Click-attacking the action itself once (the state-delta oracle judges it); skipping the field probe so it doesn't consume the only eligible row.` });
+  }
+  if (!isDirectActionFeature && learnedFromForm === 0 && authorized && process.env.XSION_NO_PROBE !== '1') {
     try {
       const probeOpts = { allowMutations: false, marker, reachFeature: opts.feature, reachNavCache: (opts as any)._reachNavCache } as any;
       const probe = await withDeadline(Number(process.env.XSION_PROBE_CAP_MS) || 45000, `break-it capture-probe "${opts.feature}"`,
@@ -369,21 +383,7 @@ async function runBreakIt(runId: string, projectId: string, baseUrl: string, opt
           ? `Capture-probe reached the "${opts.feature}" modal: ${modalFields.length} live field(s) — attacking GROUND TRUTH, not the scraped page inputs.`
           : `Capture-probe: the "${opts.feature}" surface is a field-less action modal (${pModalActs.length} preset action(s)) — no field attacks; click-attacking the modal's own actions.` });
       }
-      // DIRECT ROW-ACTION (Approve/Allocate/Delete): no modal opened, but the opener click PERSISTED a write — the
-      // feature MUTATES on click and has NO form. WARNING: the capture-probe therefore FIRES A REAL MUTATION during
-      // planning (acceptable on staging with authorized on; it's why this whole probe is gated on `authorized`). There's
-      // nothing to fill — clear the scraped crawl fields so break-it stops wasting attacks on the orders "Search
-      // customer…" box, and rely on the click-action attack (Click action "Approve" + state-delta oracle) for coverage.
-      else if (directActionSurface(false, !!(probe as any).liveOpenerPersisted) === 'direct-action') {
-        observedFields.length = 0; seenLabel.clear();
-        (opts as any)._liveScopeSeen = 'modal';   // treat as a bounded surface for the drop-gate (the action IS the surface)
-        // seed the click-action attack directly from the FEATURE's own action label (so the plan is non-empty + attacks
-        // the action, not a scraped field). matchesFeature keeps it scoped to the feature (e.g. "Approve", not "Delete").
-        const pActs = ((probe as any).liveActions || []) as string[];
-        (opts as any)._liveDirectActionsSeen = pActs.filter((a) => matchesFeature(a));
-        emit(runId, { type: 'test:think', message: `Capture-probe: "${opts.feature}" is a DIRECT row-action — it mutated on click (no form). No field attacks; the click-action attack (+ state-delta oracle) carries coverage. (The probe fired one real mutation to detect this — staging-only.)` });
-      }
-      // pScope==='page'/undefined & not a direct action → keep the crawl fields (no evidence the ambient inputs aren't it).
+      // pScope==='page'/undefined → keep the crawl fields (a direct-action feature already short-circuited above).
     } catch (e) { emit(runId, { type: 'test:think', message: `Capture-probe skipped (${String((e as Error)?.message || e).slice(0, 50)}) — using the crawl-derived fields.` }); }
   }
 
