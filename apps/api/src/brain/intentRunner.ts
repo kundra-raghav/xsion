@@ -1765,6 +1765,20 @@ export async function executeFlow(flow: IntentFlow, baseUrl: string, hooks: Exec
       } catch {}
     }
 
+    // PRE-LOOP RE-AUTH ON SESSION BOUNCE (2026-08-30): torture's in-memory SESSION can drop between the login pre-step
+    // and the first action (a stray reload / the app re-mounting), landing us BACK on the login gate. The per-step
+    // re-auth (below) only fires on a nav/reload/url-change step — so if step 1 is a CLICK, it runs on the login page,
+    // fails, and every downstream step cascades (bug-repro's loginWall false-blame: login had SUCCEEDED, then bounced).
+    // Catch it ONCE here, before the loop: if we have creds and are visibly on a login gate now, re-sign-in. Gated on a
+    // VISIBLE password field + no authed affordance (same predicate as the per-step gate) so an authed page never
+    // re-submits creds. Cheap (one evaluate), and it makes bug-repro/goal as session-robust as break-it's attack loop.
+    if (email && password && reAuthLeft > 0) {
+      try {
+        const onGate = await page.evaluate(() => { const d: any = (globalThis as any).document; const pw: any = d.querySelector('input[type=password]'); const pwVisible = !!(pw && (pw.offsetWidth || pw.offsetHeight)); const authedAffordance = !!d.querySelector('[data-nav], [role="navigation"] a, nav a'); return pwVisible && !authedAffordance; }).catch(() => false);
+        if (onGate) { reAuthLeft--; hooks.onThink?.('session dropped back to the login gate before the first step — re-authenticating so the flow runs signed-in.'); await tryLoginSettled(page, email, password, { knownAppRoute: offLoginGate }).catch(() => {}); await page.waitForTimeout(400); }
+      } catch {}
+    }
+
     let lastStepMovedView = false;   // set by the step body (a click/select/nav that landed) → gates the post-step re-capture
     for (let i = 0; i < flow.steps.length; i++) {
       lastStepMovedView = false;
@@ -2093,7 +2107,10 @@ export async function executeFlow(flow: IntentFlow, baseUrl: string, hooks: Exec
       // would re-submit creds on an authed page (the ensureSession false-positive class); (c) cap re-auths per flow.
       if (email && password && reAuthLeft > 0 && (verb === 'navigate' || verb === 'reload' || page.url() !== urlBeforeStep)) {
         try {
-          const onGate = await page.evaluate(() => { const d: any = (globalThis as any).document; const pw: any = d.querySelector('input[type=password]'); const pwVisible = !!(pw && (pw.offsetWidth || pw.offsetHeight)); const authedAffordance = !!d.querySelector('[data-nav], [role="navigation"] a, nav a, button'); return pwVisible && !authedAffordance; }).catch(() => false);
+          // authedAffordance must NOT include a bare <button> — a login page HAS a "Sign In" button, so counting it
+          // made `!authedAffordance` false on the very gate we need to detect (this gate could never fire on such a
+          // page). Match the pre-loop gate: nav affordances only ([data-nav]/nav links), which render only when authed.
+          const onGate = await page.evaluate(() => { const d: any = (globalThis as any).document; const pw: any = d.querySelector('input[type=password]'); const pwVisible = !!(pw && (pw.offsetWidth || pw.offsetHeight)); const authedAffordance = !!d.querySelector('[data-nav], [role="navigation"] a, nav a'); return pwVisible && !authedAffordance; }).catch(() => false);
           if (onGate) { reAuthLeft--; await tryLoginSettled(page, email, password, { knownAppRoute: offLoginGate }).catch(() => {}); await page.waitForTimeout(400); hooks.onThink?.('session bounced to login mid-attack — re-authenticated to keep the attack running.'); }
         } catch {}
       }
