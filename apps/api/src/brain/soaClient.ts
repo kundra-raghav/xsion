@@ -59,8 +59,20 @@ export function bridgePayloadIsRetryable(res: any): boolean {
   return /unparseable|no json|empty (reply|response|output)|parse fail(ed|ure)?|malformed|could not parse/i.test(e);
 }
 
+// PER-TASK MODEL ROUTING (2026-08-30): each SoA task (the bridge's args[0]: 'audit' / 'breakit' / 'bugrepro' /
+// 'explore' / …) can be routed to a DIFFERENT model, because a measured A/B shows the models have opposite strengths
+// (Kimi: fast plans that fit the 45s breakit cap; Claude Sonnet: better at the code-grounded audit but slower). The
+// model for a task is `XSION_MODEL_<TASK>` (e.g. XSION_MODEL_AUDIT=anthropic/claude-sonnet-4-5), falling back to a
+// global SOA_PPLX_MODEL pin, else the bridge's own turn-type router (today's behavior). ALL UNSET BY DEFAULT → routing
+// is opt-in and behavior is unchanged until an env var is set; a winning A/B flips one var, not code. Exported for test.
+export function modelForTask(task: string, env: NodeJS.ProcessEnv = process.env): string {
+  const perTask = env[`XSION_MODEL_${String(task || '').toUpperCase().replace(/[^A-Z0-9]/g, '_')}`];
+  return (perTask || env.SOA_PPLX_MODEL || '').trim();
+}
+
 function runBridgeOnce(args: string[], timeoutMs: number): Promise<any> {
   return new Promise((resolve, reject) => {
+    const pinned = modelForTask(args[0]);
     const env = {
       ...process.env,
       SOA_BACKEND: process.env.SOA_BACKEND || 'perplexity',
@@ -68,6 +80,8 @@ function runBridgeOnce(args: string[], timeoutMs: number): Promise<any> {
       // kimi-as-driver (the routing fix) + a sane per-call spend cap for planning/verify
       SOA_V3_PROMOTE_ON_ANY_READ: process.env.SOA_V3_PROMOTE_ON_ANY_READ || '1',
       SOA_MAX_COST_USD: process.env.SOA_MAX_COST_USD || '0.60',
+      // per-task model pin (empty ⇒ bridge's own router decides, i.e. today's default). SOA_PPLX_MODEL bypasses the router.
+      ...(pinned ? { SOA_PPLX_MODEL: pinned } : {}),
     };
     const proc = spawn(PYTHON, [BRIDGE, ...args], { cwd: SOA_DIR, env });
     let out = '';
@@ -195,7 +209,12 @@ export async function breakItPlan(
   // now has the crawler's learned form fields — ever ran). The scaffold is the reliable coverage; SoA's plan is a
   // bonus. On timeout, return an empty plan gracefully so the engine falls through to the scaffold, not a dead run.
   try {
-    const res = await runBridge(['breakit', repo || '-', JSON.stringify(input)], 45_000);
+    // Cap env-tunable (XSION_BREAKIT_PLAN_CAP_MS): default 45s keeps the SoA plan off the critical path (a slow plan
+    // used to hang the run before the deterministic scaffold ran). A SLOWER-but-stronger model (Claude) exceeds 45s
+    // 4/4 in the A/B — raise the cap ONLY when running XSION_PLAN_SOURCE=both with such a model; it's a `both`-mode
+    // knob, not a default-path change (default is scaffold-only, which skips this call entirely).
+    const cap = Number(process.env.XSION_BREAKIT_PLAN_CAP_MS) || 45_000;
+    const res = await runBridge(['breakit', repo || '-', JSON.stringify(input)], cap);
     return { plan: Array.isArray(res.plan) ? res.plan : [], error: res.error };
   } catch (e: any) {
     return { plan: [], error: `SoA plan skipped (${String(e?.message || e).slice(0, 60)}) — using the deterministic scaffold from the learned form fields.` };
